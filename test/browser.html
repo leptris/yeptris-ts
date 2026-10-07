@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+<body>
+<pre id="out">pending</pre>
+<script type="module">
+import init from "../dist/yeptris.mjs";
+import initApi from "../src/index.js";
+
+const out = document.getElementById("out");
+try {
+  const mod = await init();
+  const { loads, dump, engineVersion } = initApi(mod);
+  const v = loads('name = "browser"\nport = 8080\n[t]\nk = 1.5\n');
+  if (v.name !== "browser" || v.port !== 8080 || v.t.k !== 1.5) {
+    throw new Error("loads shape");
+  }
+  const back = loads(dump(v));
+  if (JSON.stringify(back) !== JSON.stringify(v)) {
+    throw new Error("round-trip");
+  }
+  if (!engineVersion().startsWith("0.1.")) throw new Error("version");
+  out.textContent = "WASM-BROWSER-OK " + engineVersion();
+} catch (e) {
+  out.textContent = "WASM-BROWSER-FAIL " + (e && e.message);
+}
+</script>
+</body>
+</html>

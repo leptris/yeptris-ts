@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: wasm build + node test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout engine repository
+        uses: actions/checkout@v4
+        with:
+          repository: leptris/yeptris
+          ref: main
+          path: engine
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: "3.1.50"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Build the wasm module
+        run: ./build.sh
+        env:
+          ENGINESRC: ${{ github.workspace }}/engine/src
+      - name: node --test
+        run: node --test test/test.mjs

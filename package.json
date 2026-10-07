@@ -1,0 +1,21 @@
+{
+  "name": "yeptris-wasm",
+  "version": "0.1.0",
+  "description": "YAML for JavaScript at libyeptris speed (WebAssembly, no fallback)",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "./build.sh",
+    "test": "node --test test/test.mjs"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  }
+}

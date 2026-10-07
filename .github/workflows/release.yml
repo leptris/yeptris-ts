@@ -1,0 +1,51 @@
+# Release train for yeptris-wasm (npm Trusted Publishing).
+#
+# Versions are the owner's decision: bump package.json through a
+# merged PR, then dispatch. The first publish is manual (configure
+# leptris/yeptris-wasm + release.yml as the package's publisher on
+# npmjs afterwards); subsequent dispatches publish via OIDC.
+
+name: Release
+
+permissions:
+  contents: write
+  id-token: write
+
+on:
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: build + npm publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout engine repository
+        uses: actions/checkout@v4
+        with:
+          repository: leptris/yeptris
+          ref: main
+          path: engine
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: "3.1.50"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+      - name: Build the wasm module
+        run: ./build.sh
+        env:
+          ENGINESRC: ${{ github.workspace }}/engine/src
+      - name: node --test
+        run: node --test test/test.mjs
+      - name: Publish (npm Trusted Publishing)
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Version
+        run: echo "V=$(node -p 'require(\"./package.json\").version')" >> "$GITHUB_ENV"
+      - name: Tag and release
+        run: gh release create "v$V" dist/yeptris.mjs dist/yeptris.wasm --generate-notes --title "yeptris-wasm v$V"
+        env:
+          GH_TOKEN: ${{ github.token }}
