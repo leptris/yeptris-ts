@@ -1,8 +1,8 @@
-# Release train for yeptris-wasm (npm Trusted Publishing).
+# Release train for yeptris (npm Trusted Publishing).
 #
 # Versions are the owner's decision: bump package.json through a
 # merged PR, then dispatch. The first publish is manual (configure
-# leptris/yeptris-wasm + release.yml as the package's publisher on
+# leptris/yeptris-ts + release.yml as the package's publisher on
 # npmjs afterwards); subsequent dispatches publish via OIDC.
 
 name: Release

@@ -1,4 +1,4 @@
-# yeptris-wasm
+# yeptris
 
 YAML for JavaScript at [libyeptris](https://github.com/leptris/yeptris)
 speed — the engine compiled to WebAssembly (ES module, no fallback).
@@ -12,7 +12,7 @@ iterparse are planned next (the engine's PLAN.md, "The best-ever
 program").
 
 ```js
-import { load, dump } from "yeptris-wasm";
+import { load, dump } from "yeptris";
 
 const doc = await load("name: yeptris\nlangs:\n- c\n- rust\n");
 // { name: "yeptris", langs: ["c", "rust"] }
@@ -45,7 +45,7 @@ CI builds the engine tag and runs the same on every push and PR.
 ## Releasing
 
 `npm publish` runs through the dispatch-only workflow (Trusted
-Publishing — configure `leptris/yeptris-wasm` + `release.yml` as the
+Publishing — configure `leptris/yeptris-ts` + `release.yml` as the
 package's publisher on npmjs). The first publish is manual; after
 that, dispatch **Release** and the dist build + publish + GitHub
 release run as one train.
