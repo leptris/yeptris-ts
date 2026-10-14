@@ -1,4 +1,4 @@
-# Release train for yeptris (npm Trusted Publishing).
+# Publish train for yeptris (npm Trusted Publishing, OIDC).
 #
 # Versions are the owner's decision: bump package.json through a
 # merged PR, then dispatch. The first publish is manual (configure
@@ -39,13 +39,16 @@ jobs:
           ENGINESRC: ${{ github.workspace }}/engine/src
       - name: node --test
         run: node --test test/test.mjs
-      - name: Publish (npm Trusted Publishing)
+      - name: Publish (npm Trusted Publishing, OIDC)
+        # id-token: write above hands npm the OIDC token; npm uses it
+        # to authenticate against the Trusted Publisher configured on
+        # npmjs.com for this workflow. Configure the TP entry
+        # (org: leptris, repo: yeptris-ts, workflow filename:
+        # release.yml) before the first OIDC dispatch.
         run: npm publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Version
         run: echo "V=$(node -p 'require(\"./package.json\").version')" >> "$GITHUB_ENV"
       - name: Tag and release
-        run: gh release create "v$V" dist/yeptris.mjs dist/yeptris.wasm --generate-notes --title "yeptris-wasm v$V"
+        run: gh release create "v$V" dist/yeptris.mjs dist/yeptris.wasm --generate-notes --title "yeptris v$V"
         env:
           GH_TOKEN: ${{ github.token }}
