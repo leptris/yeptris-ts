@@ -35,8 +35,17 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - name: Build the wasm module
-        run: ./build.sh
+      - name: Build (zero-warning gate)
+        run: |
+          set -o pipefail
+          ./build.sh 2>&1 | tee build.log
+          # The wasm32 build is the only lane that compiles the engine with
+          # 32-bit size_t/uintptr_t — warnings there are real portability
+          # bugs (truncated 64-bit constants, UB shifts), not noise.
+          ! grep -q "warning:" build.log || {
+            echo "::error::emcc emitted warnings — wasm32 portability class"
+            exit 1
+          }
         env:
           ENGINESRC: ${{ github.workspace }}/engine/src
       - name: node --test
