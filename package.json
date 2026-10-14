@@ -1,5 +1,5 @@
 {
-  "name": "yeptris-wasm",
+  "name": "yeptris",
   "version": "0.1.0",
   "description": "YAML for JavaScript at libyeptris speed (WebAssembly, no fallback)",
   "type": "module",
