@@ -4030,3 +4030,131 @@ TEST(Parse, BreakNormalizationKeepsTheInputLength) {
         ASSERT_EQ(acc[0][i].col, acc[1][i].col);
     }
 }
+
+TEST(Parse, StepScanTracksFlowValueQuotes) {
+    /* catch 93 (the nightly's run 38534965021): step_scan's space
+     * handler set tok_start = word_led, so after a plain-led key the
+     * quote at the flow VALUE position was not tracked — the cut
+     * landed inside the quoted span ("{f '}\n--- '}": whole saw the
+     * far close and ate the '---' marker, chunked errored on the
+     * unterminated prefix). In a flow a space always ends the token. */
+    const char* y = "{f '}\n--- '}\n";
+    /* whole and chunked must agree (both reject: the quote is
+     * unterminated in the whole buffer too once tracked) */
+    typedef struct {
+        uint16_t type;
+        uint32_t line, col;
+    } pin_rec;
+    pin_rec a[32] = {}, b[32] = {};
+    size_t an = 0, bn = 0;
+    {
+        YeptrisRecorder rec = yeptris_recorder_new();
+        ASSERT_NE(rec, nullptr);
+        yeptris_recorder_feed(rec, y, strlen(y), 1);
+        size_t n = 0;
+        const YeptrisEventRecord* rs = yeptris_recorder_records(rec, &n);
+        for (size_t i = 0; i < n && an < 32; i++) {
+            a[an].type = rs[i].type;
+            a[an].line = rs[i].line;
+            a[an].col = rs[i].col;
+            an++;
+        }
+        yeptris_recorder_free(rec);
+    }
+    {
+        YeptrisRecorder rec = yeptris_recorder_new();
+        ASSERT_NE(rec, nullptr);
+        for (size_t off = 0; off < strlen(y); off++) {
+            yeptris_recorder_feed(rec, y + off, 1, 0);
+            size_t n = 0;
+            const YeptrisEventRecord* rs = yeptris_recorder_records(rec, &n);
+            for (size_t i = 0; i < n && bn < 32; i++) {
+                b[bn].type = rs[i].type;
+                b[bn].line = rs[i].line;
+                b[bn].col = rs[i].col;
+                bn++;
+            }
+        }
+        yeptris_recorder_feed(rec, "", 0, 1);
+        size_t n = 0;
+        const YeptrisEventRecord* rs = yeptris_recorder_records(rec, &n);
+        for (size_t i = 0; i < n && bn < 32; i++) {
+            b[bn].type = rs[i].type;
+            b[bn].line = rs[i].line;
+            b[bn].col = rs[i].col;
+            bn++;
+        }
+        yeptris_recorder_free(rec);
+    }
+    ASSERT_GT(an, 0u);
+    ASSERT_EQ(an, bn);
+    for (size_t i = 0; i < an; i++) {
+        ASSERT_EQ(a[i].type, b[i].type);
+        ASSERT_EQ(a[i].line, b[i].line);
+        ASSERT_EQ(a[i].col, b[i].col);
+    }
+}
+
+TEST(Parse, FlowPreScanIncompleteDefersOnPartialFeeds) {
+    /* catch 92 (the nightly's run 38530395946): e_skip_flow's
+     * "unclosed at buffer end" return fired identically for partial
+     * step feeds and complete buffers. A cut before the flow's '}'
+     * ('{ !< }\n--- }') made the '{' arm bail before MAP_START in the
+     * chunked path while whole (with the '}') emitted it — different
+     * record counts for the same bytes. The pre-scan now defers when
+     * the engine is mid-stream (parsing_final = 0); complete-buffer
+     * errors are unchanged. */
+    const char* y = "{ !< }\n--- }\n";
+    typedef struct {
+        uint16_t type;
+        uint32_t line, col;
+    } pin_rec;
+    pin_rec a[32] = {}, b[32] = {};
+    size_t an = 0, bn = 0;
+    {
+        YeptrisRecorder rec = yeptris_recorder_new();
+        ASSERT_NE(rec, nullptr);
+        yeptris_recorder_feed(rec, y, strlen(y), 1);
+        size_t n = 0;
+        const YeptrisEventRecord* rs = yeptris_recorder_records(rec, &n);
+        for (size_t i = 0; i < n && an < 32; i++) {
+            a[an].type = rs[i].type;
+            a[an].line = rs[i].line;
+            a[an].col = rs[i].col;
+            an++;
+        }
+        yeptris_recorder_free(rec);
+    }
+    {
+        YeptrisRecorder rec = yeptris_recorder_new();
+        ASSERT_NE(rec, nullptr);
+        for (size_t off = 0; off < strlen(y); off++) {
+            yeptris_recorder_feed(rec, y + off, 1, 0);
+            size_t n = 0;
+            const YeptrisEventRecord* rs = yeptris_recorder_records(rec, &n);
+            for (size_t i = 0; i < n && bn < 32; i++) {
+                b[bn].type = rs[i].type;
+                b[bn].line = rs[i].line;
+                b[bn].col = rs[i].col;
+                bn++;
+            }
+        }
+        yeptris_recorder_feed(rec, "", 0, 1);
+        size_t n = 0;
+        const YeptrisEventRecord* rs = yeptris_recorder_records(rec, &n);
+        for (size_t i = 0; i < n && bn < 32; i++) {
+            b[bn].type = rs[i].type;
+            b[bn].line = rs[i].line;
+            b[bn].col = rs[i].col;
+            bn++;
+        }
+        yeptris_recorder_free(rec);
+    }
+    ASSERT_GT(an, 0u);
+    ASSERT_EQ(an, bn);
+    for (size_t i = 0; i < an; i++) {
+        ASSERT_EQ(a[i].type, b[i].type);
+        ASSERT_EQ(a[i].line, b[i].line);
+        ASSERT_EQ(a[i].col, b[i].col);
+    }
+}

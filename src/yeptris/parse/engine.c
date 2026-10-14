@@ -95,6 +95,10 @@ struct yep_engine {
     uint32_t pend_anchor_id; /* the pend anchor's ordinal */
 
     int doc_content;   /* any node emitted for the current document */
+    int parsing_final; /* engine_run_impl's emit_end: the buffer is the
+                        * complete input (pre-scan errors are real) vs a
+                        * partial step feed (an unclosed flow is
+                        * incomplete, not malformed) */
     int q_key_pending; /* an explicit '?' key awaits its ':' value line */
     int qmd_stack[16]; /* the '?' pending pairs' map depths — a STACK:
                         * nested '? ?' pairs stack two pendings and a
@@ -1399,6 +1403,10 @@ static int e_skip_flow(yep_engine* e) {
         e->pos++;
     }
     if (n != 0) {
+        if (!e->parsing_final) {
+            return 0; /* incomplete: more bytes may close it; the real
+                       * parse (e_flow) owns the deferral */
+        }
         return e_fail(e, YEP_ERR_UNEXPECTED, e->len);
     }
     return 0;
@@ -3657,6 +3665,8 @@ typedef struct yep_stepstate {
     size_t scanned;     /* bytes folded into quote/flow/comment state */
     int in_flow;        /* open [ { depth */
     int quote;          /* 0 none, else the opening quote char */
+    int in_verbatim;    /* inside a "!<...>" verbatim tag: cuts would
+                         * split the tag across the chunk boundary */
     int in_comment;     /* inside a # comment (until the line break) */
     int saw_directive;  /* a % line awaits its --- document */
     int started;        /* STREAM_START emitted */
@@ -3759,6 +3769,13 @@ static size_t step_scan(yep_stepstate* st) {
             }
             continue;
         }
+        if (st->in_verbatim) {
+            if (c == '>') {
+                st->in_verbatim = 0;
+            }
+            continue; /* verbatim tag bytes never cut (a truncated tag
+                       * at the buffer end holds the tail whole) */
+        }
         if (c == '#') {
             char prev = i > 0 ? p[i - 1] : '\n';
             if (prev == '\n' || prev == ' ' || prev == '\t') {
@@ -3772,11 +3789,29 @@ static size_t step_scan(yep_stepstate* st) {
             continue;
         }
         if (c == ' ' || c == '\t') {
-            st->tok_start = st->word_led; /* after an indicator-led word a
-                                           * quoted node may follow */
+            /* in a flow a space always ends the token: the next byte
+             * may begin the VALUE ("{f 'x'}" — the quote after the
+             * plain key is the value's opener, and missing it let the
+             * cut land inside the quoted span, splitting the scalar
+             * across the chunk boundary: whole saw the far close and
+             * ate the '---' marker, chunked errored on the unterminated
+             * prefix — the nightly's run 38534965021) */
+            st->tok_start = (st->in_flow > 0) ? 1 : st->word_led;
             continue;
         }
         if (st->tok_start) {
+            if (c == '!') {
+                if (i + 1 >= st->len) {
+                    hold = i; /* a possibly-truncated '!<': the next
+                               * byte decides verbatim vs named */
+                    break;
+                }
+                if (p[i + 1] == '<') {
+                    st->in_verbatim = 1;
+                    i++; /* the '<' rides */
+                    continue;
+                }
+            }
             st->word_led = (c == '&' || c == '*' || c == '!' || c == '-' || c == '?' || c == ':' ||
                             c == ',' || c == '[' || c == '{' || c == ']' || c == '}');
             if (c == '\'' || c == '"') {
@@ -3973,6 +4008,7 @@ int yep_engine_step(yep_engine* e, const char* chunk, size_t len, int final, con
         /* the tail began at a --- line in a clean state */
         st->in_flow = 0;
         st->quote = 0;
+        st->in_verbatim = 0;
         st->in_comment = 0;
         st->saw_directive = 0;
         return 0;
@@ -3994,6 +4030,7 @@ static int engine_run_impl(yep_engine* e, const char* buf, size_t len, const yep
     }
     yep_free(e->sys, e->norm_buf);
     e->norm_buf = NULL;
+    e->parsing_final = emit_end;
     size_t norm_len = len;
     e->p = e_normalize_breaks(e, buf, len, &norm_len);
     e->len = norm_len;

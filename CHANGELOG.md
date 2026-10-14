@@ -10,6 +10,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed
 Post-0.6.32 fuzz catches and the tag-props family (each pinned;
 crashers in the regression corpus).
+- **parse: step_scan tracks flow-value quotes and verbatim tags** —
+  the incremental cut scanner's token-start rule after a plain-led
+  key left the quote at a flow VALUE position untracked, so the cut
+  landed inside the quoted span (`{f '}` + `---` + `'}'`: whole saw
+  the far close and swallowed the `---` marker, chunked errored on
+  the unterminated prefix); and a cut inside a `!` verbatim tag
+  (`{ !< }` + `---`) made the partial prefix's flow pre-scan fail
+  before `MAP_START` emitted while the whole buffer's succeeded. In a
+  flow a space now always re-arms the token start, `!` verbatim tags
+  are tracked (and a possibly-truncated `!` holds the tail), and the
+  flow pre-scan defers unclosed collections on partial feeds while
+  complete-buffer errors stay (nightly runs 38530395946 and
+  38534965021, catches 92 and 93).
 - **parse: the break normalizer keeps the input's own length** — the
   NEL/LS/PS copy is null-terminated and the run measured it with
   `strlen`, so an input carrying a NUL byte of its own was truncated
