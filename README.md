@@ -3,6 +3,14 @@
 YAML for JavaScript at [libyeptris](https://github.com/leptris/yeptris)
 speed — the engine compiled to WebAssembly (ES module, no fallback).
 
+Part of the yeptris program: *the best (multiple dimensions)
+YAML/JSON parser/builder ever* — conformance, performance,
+safety/hardening, API surfaces, transport correctness, and trust,
+held simultaneously, in C, Ruby, Rust, and JS. This binding is the
+thinnest surface (the WASM module); the recorder bulk-drain and
+iterparse are planned next (the engine's PLAN.md, "The best-ever
+program").
+
 ```js
 import { load, dump } from "yeptris-wasm";
 
