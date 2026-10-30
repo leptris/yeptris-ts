@@ -51,3 +51,18 @@ test("round trip: yaml -> js -> yaml -> js is stable", async () => {
   const twice = await load(await dump(once));
   assert.deepEqual(twice, once);
 });
+
+test("module guard: the built dist carries every guarded export", async () => {
+  const factory = (await import("../dist/yeptris.mjs")).default;
+  const m = await factory();
+  for (const fn of ["_yeptris_wasm_load", "_yeptris_wasm_dump", "_yeptris_wasm_out",
+                    "_yeptris_wasm_last_error", "_yeptris_wasm_free", "_malloc"]) {
+    assert.equal(typeof m[fn], "function", `${fn} must be exported`);
+  }
+});
+
+test("module guard: the wrapper refuses an export-less module", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(new URL("../src/index.js", import.meta.url), "utf8");
+  assert.match(src, /missing the wasm export/, "the loud-failure guard is present");
+});
