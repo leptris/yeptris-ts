@@ -44,7 +44,28 @@ let cached = null;
 async function mod() {
   if (cached) return cached;
   const factory = (await import("../dist/yeptris.mjs")).default;
-  cached = await factory();
+  const m = await factory();
+  // Fail loudly on a stale or truncated dist: a module missing the
+  // engine's exports would otherwise answer every call with empty
+  // strings and consumed bytes at microsecond speed (yeptris-ts#4 —
+  // the published 0.1.0 measured 121k loads/s on 205 KB, i.e. no
+  // parse at all).
+  for (const fn of [
+    "_yeptris_wasm_load",
+    "_yeptris_wasm_dump",
+    "_yeptris_wasm_out",
+    "_yeptris_wasm_last_error",
+    "_yeptris_wasm_free",
+    "_malloc",
+  ]) {
+    if (typeof m[fn] !== "function") {
+      throw new Error(
+        `yeptris: dist/yeptris.mjs is missing the wasm export ${fn} — ` +
+          "rebuild with build.sh (stale or mismatched artifact)",
+      );
+    }
+  }
+  cached = m;
   return cached;
 }
 
