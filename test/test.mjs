@@ -66,3 +66,28 @@ test("module guard: the wrapper refuses an export-less module", async () => {
   const src = readFileSync(new URL("../src/index.js", import.meta.url), "utf8");
   assert.match(src, /missing the wasm export/, "the loud-failure guard is present");
 });
+
+test("non-ASCII documents parse whole (byte length, not UTF-16 units)", async () => {
+  // input.length counts UTF-16 code units; the wire needs UTF-8 bytes —
+  // every non-ASCII document parsed truncated before the fix
+  const doc = await load('name: "café"\nemoji: " rocket"\n');
+  assert.deepEqual(doc, { name: "café", emoji: " rocket" });
+  const big = 'k: "ééééé ' + "x".repeat(4000) + '"\n';
+  const back = await load(big);
+  assert.equal(back.k.length, 5 + 1 + 4000);
+  assert.equal(back.k.endsWith("x"), true);
+});
+
+test("the wasm output buffer frees after every call", async () => {
+  // the C side mallocs one output per successful call; nothing else
+  // freed it — a long-running process grew the wasm heap by one output
+  // per call. After a call the global must be back to NULL.
+  const { wasmModule } = await import("../src/index.js");
+  const mod = await wasmModule(); // THE instance load()/dump() share
+  await load("k: v\n");
+  assert.equal(mod._yeptris_wasm_out(), 0, "output buffer not freed after load");
+  await dump('{"k":"v"}');
+  assert.equal(mod._yeptris_wasm_out(), 0, "output buffer not freed after dump");
+  await assert.rejects(() => load("k: [unclosed\n")); // an ERROR call
+  assert.equal(mod._yeptris_wasm_out(), 0);
+});

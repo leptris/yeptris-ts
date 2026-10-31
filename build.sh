@@ -23,7 +23,7 @@ emcc -O3 -std=c11 \
   "$ENGINESRC"/yeptris/*/*/*.c \
   -s MODULARIZE=1 -s EXPORT_ES6=1 -s ENVIRONMENT=web,node \
   -s EXPORTED_RUNTIME_METHODS="['UTF8ToString','stringToUTF8','lengthBytesUTF8']" \
-  -s EXPORTED_FUNCTIONS='["_yeptris_wasm_load","_yeptris_wasm_dump","_yeptris_wasm_out","_yeptris_wasm_out_len","_yeptris_wasm_last_error","_yeptris_wasm_last_error_line","_yeptris_wasm_last_error_column","_yeptris_wasm_free","_malloc","_yeptris_wasm_version"]' \
+  -s EXPORTED_FUNCTIONS='["_yeptris_wasm_load","_yeptris_wasm_dump","_yeptris_wasm_out","_yeptris_wasm_out_len","_yeptris_wasm_out_free","_yeptris_wasm_last_error","_yeptris_wasm_last_error_line","_yeptris_wasm_last_error_column","_yeptris_wasm_free","_malloc","_yeptris_wasm_version"]' \
   -s WASM_BIGINT=1 \
   -s ALLOW_MEMORY_GROWTH=1 \
   -o dist/yeptris.mjs
