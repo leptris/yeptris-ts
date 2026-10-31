@@ -96,6 +96,13 @@ EMSCRIPTEN_KEEPALIVE
 int yeptris_wasm_out_len(void) { return (int)g_out_len; }
 
 EMSCRIPTEN_KEEPALIVE
+void yeptris_wasm_out_free(void) {
+    yeptris_free(g_out);
+    g_out = NULL;
+    g_out_len = 0;
+}
+
+EMSCRIPTEN_KEEPALIVE
 void yeptris_wasm_free(void *p) { yeptris_free(p); }
 
 EMSCRIPTEN_KEEPALIVE

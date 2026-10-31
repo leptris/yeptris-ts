@@ -5,7 +5,7 @@ function cstr(mod, s) {
   const bytes = mod.lengthBytesUTF8(s) + 1;
   const ptr = mod._malloc(bytes);
   mod.stringToUTF8(s, ptr, bytes);
-  return ptr;
+  return [ptr, bytes - 1]; // bytes - 1: the NUL is ours, not the input's
 }
 
 function freeCstr(mod, ptr) {
@@ -22,9 +22,13 @@ class YamlError extends Error {
 }
 
 function run(mod, fn, input) {
-  const ptr = cstr(mod, input);
+  const [ptr, len] = cstr(mod, input);
   try {
-    const st = fn(ptr, input.length);
+    // len is the UTF-8 byte count: input.length counts UTF-16 code
+    // units, which is strictly shorter than the wire bytes for any
+    // non-ASCII text (é is 1 unit / 2 bytes) — every such document
+    // parsed truncated
+    const st = fn(ptr, len);
     if (st !== 0) {
       const msg = mod.UTF8ToString(mod._yeptris_wasm_last_error());
       throw new YamlError(
@@ -32,10 +36,14 @@ function run(mod, fn, input) {
         mod._yeptris_wasm_last_error_line(),
         mod._yeptris_wasm_last_error_column());
     }
-    const out = mod.UTF8ToString(mod._yeptris_wasm_out());
+    const out = mod.UTF8ToString(mod._yeptris_wasm_out(), mod._yeptris_wasm_out_len());
     return out;
   } finally {
     freeCstr(mod, ptr);
+    // the C side mallocs the output per call and nothing else freed
+    // it — without this a long-running process grows the wasm heap by
+    // one output per call
+    mod._yeptris_wasm_out_free();
   }
 }
 
@@ -54,6 +62,8 @@ async function mod() {
     "_yeptris_wasm_load",
     "_yeptris_wasm_dump",
     "_yeptris_wasm_out",
+    "_yeptris_wasm_out_len",
+    "_yeptris_wasm_out_free",
     "_yeptris_wasm_last_error",
     "_yeptris_wasm_free",
     "_malloc",
@@ -96,4 +106,11 @@ export async function dump(json) {
 export async function version() {
   const m = await mod();
   return m.UTF8ToString(m._yeptris_wasm_version());
+}
+
+/** The wasm module instance this package caches (diagnostics:
+ * heap/memory inspection, the engine's raw exports). The load/dump
+ * calls all share this one instance. */
+export async function wasmModule() {
+  return mod();
 }

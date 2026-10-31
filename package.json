@@ -4,11 +4,16 @@
   "description": "YAML for JavaScript at libyeptris speed (WebAssembly, no fallback)",
   "type": "module",
   "main": "src/index.js",
+  "types": "src/index.d.ts",
   "exports": {
-    ".": "./src/index.js"
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    }
   },
   "files": [
-    "dist"
+    "dist",
+    "src"
   ],
   "scripts": {
     "build": "./build.sh",
