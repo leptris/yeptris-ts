@@ -31,8 +31,12 @@ jobs:
           version: "3.1.50"
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-          registry-url: https://registry.npmjs.org
+          # npm >= 11.5.1 is REQUIRED for Trusted Publishing (OIDC);
+          # node 20's npm 10 predates it and the PUT 404s
+          node-version: 24
+        # no registry-url: an .npmrc authToken line makes npm ignore
+        # the OIDC exchange entirely; with none, npm 11+ publishes via
+        # the workflow's id-token against the registered TP
       - name: Build the wasm module
         run: ./build.sh
         env:
