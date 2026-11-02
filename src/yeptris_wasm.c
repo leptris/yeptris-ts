@@ -13,6 +13,7 @@
 #include "yeptris/dom.h"
 #include "yeptris/emit.h"
 #include "yeptris/error.h"
+#include "yeptris/events.h"
 #include "yeptris/json.h"
 #include "yeptris/parse.h"
 #include "yeptris/version.h"
@@ -385,3 +386,82 @@ void yeptris_wasm_free(void *p) { yeptris_free(p); }
 
 EMSCRIPTEN_KEEPALIVE
 const char *yeptris_wasm_version(void) { return yeptris_version(); }
+
+/* ---- events (the recorder bulk drain) ----------------------------------
+ *
+ * The engine ships three event models over the one parse: push (a
+ * callback per event), pull (a StAX cursor) and the recorder (fixed
+ * 44-byte records plus one copied string arena). Across the wasm
+ * boundary the RECORDER is the fit: the whole stream answers as two
+ * spans — the record array and the arena — which the host reads
+ * straight from the heap in one pass. That is O(1) crossings per
+ * stream; push would cross once per event and pull would need a
+ * cursor protocol whose strings die at the next call. This mirrors
+ * exactly what the ctypes/FFI readers of the ruby/py/rs faces do with
+ * the same record layout.
+ *
+ * Lifecycle is the load pattern: one C call (feed, final), the drain
+ * retained in globals until the host has decoded it, then an explicit
+ * free. */
+static YeptrisRecorder g_ev_rec;
+static size_t g_ev_count;
+static size_t g_ev_arena_len;
+
+EMSCRIPTEN_KEEPALIVE
+int yeptris_wasm_events(const char *data, size_t len) {
+    if (g_ev_rec != NULL) { /* defensive: the previous drain was not freed */
+        yeptris_recorder_free(g_ev_rec);
+        g_ev_rec = NULL;
+    }
+    g_ev_count = 0;
+    g_ev_arena_len = 0;
+    YeptrisRecorder rec = yeptris_recorder_new();
+    if (rec == NULL) {
+        capture_plain("recorder allocation failed");
+        return YEPTRIS_ERROR_MEMORY;
+    }
+    /* One chunk, final: the recorder v1 buffers to the stream end, so
+     * a whole-input feed IS the drain (mid-stream feeds arrive with the
+     * engine's resumable stepping and keep this shape). */
+    YeptrisStatus st = yeptris_recorder_feed(rec, data, len, 1);
+    if (st != YEPTRIS_OK) {
+        uint32_t line = 0;
+        uint32_t col = 0;
+        yeptris_recorder_status(rec, &line, &col);
+        /* the recorder carries status + 1-based position, no message
+         * string (its errors are parse errors by construction) */
+        snprintf(last_error, sizeof last_error, "parse failed");
+        last_error_line = (int)line;
+        last_error_column = (int)col;
+        yeptris_recorder_free(rec);
+        return (int)st;
+    }
+    g_ev_rec = rec;
+    yeptris_recorder_records(rec, &g_ev_count);
+    yeptris_recorder_arena(rec, &g_ev_arena_len);
+    return YEPTRIS_OK;
+}
+
+EMSCRIPTEN_KEEPALIVE
+const YeptrisEventRecord *yeptris_wasm_event_records(void) {
+    return g_ev_rec != NULL ? yeptris_recorder_records(g_ev_rec, NULL) : NULL;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int yeptris_wasm_event_count(void) { return (int)g_ev_count; }
+
+EMSCRIPTEN_KEEPALIVE
+const char *yeptris_wasm_event_arena(void) {
+    return g_ev_rec != NULL ? yeptris_recorder_arena(g_ev_rec, NULL) : NULL;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int yeptris_wasm_event_arena_len(void) { return (int)g_ev_arena_len; }
+
+EMSCRIPTEN_KEEPALIVE
+void yeptris_wasm_events_free(void) {
+    yeptris_recorder_free(g_ev_rec);
+    g_ev_rec = NULL;
+    g_ev_count = 0;
+    g_ev_arena_len = 0;
+}
