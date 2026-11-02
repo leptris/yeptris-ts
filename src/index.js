@@ -60,6 +60,7 @@ async function mod() {
   // parse at all).
   for (const fn of [
     "_yeptris_wasm_load",
+    "_yeptris_wasm_load_all",
     "_yeptris_wasm_dump",
     "_yeptris_wasm_out",
     "_yeptris_wasm_out_len",
@@ -81,10 +82,23 @@ async function mod() {
 
 /** Parse YAML text and return the document as a JavaScript value
  * (the engine's canonical JSON, JSON.parse'd). Throws YamlError with
- * line/column on malformed input. */
+ * line/column on malformed input. A multi-document stream answers
+ * with the FIRST document (the engine's json contract); every
+ * document of a stream comes from loadAll. */
 export async function load(yaml) {
   const m = await mod();
   return JSON.parse(run(m, m._yeptris_wasm_load, yaml));
+}
+
+/** Parse a multi-document YAML stream and return EVERY document as a
+ * JavaScript value, in stream order (js-yaml's loadAll shape). An
+ * empty or comment-only stream answers []; an empty document
+ * ("---\n---") answers null at its position. options is accepted for
+ * call-site symmetry and reserved (load takes none today). Throws
+ * YamlError with line/column on malformed input. */
+export async function loadAll(yaml, options) {
+  const m = await mod();
+  return JSON.parse(run(m, m._yeptris_wasm_load_all, yaml));
 }
 
 /** Parse YAML text and return the engine's canonical JSON string. */
