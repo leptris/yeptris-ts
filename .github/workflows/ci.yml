@@ -19,7 +19,7 @@ env:
   # EACH ENGINE WAVE: every engine release train re-points this at the
   # new tag; an unpinned ref: main silently picks up engine breakage
   # mid-wave.
-  ENGINE_REF: refs/tags/v0.6.58
+  ENGINE_REF: refs/tags/v0.6.59
 
 jobs:
   test:
