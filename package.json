@@ -1,6 +1,6 @@
 {
   "name": "yeptris",
-  "version": "0.6.56",
+  "version": "0.6.57",
   "description": "YAML for JavaScript at libyeptris speed (WebAssembly, no fallback)",
   "type": "module",
   "main": "src/index.js",
