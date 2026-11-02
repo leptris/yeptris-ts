@@ -19,7 +19,7 @@ env:
   # a bad engine main must not break a publish (the pin law). BUMP
   # WITH EACH ENGINE WAVE: every engine release train re-points this
   # at the new tag BEFORE dispatching this workflow.
-  ENGINE_REF: refs/tags/v0.6.57
+  ENGINE_REF: refs/tags/v0.6.58
 
 jobs:
   publish:
