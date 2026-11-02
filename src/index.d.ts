@@ -22,6 +22,53 @@ export declare function loadAll(
 /** Parse YAML text and return the engine's canonical JSON string. */
 export declare function loadJSON(yaml: string): Promise<string>;
 
+/** One normalized parse event (the recorder's bulk drain). Absent
+ * properties are omitted, never null. */
+export interface YamlEvent {
+  /** stream-start | stream-end | document-start | document-end |
+   *  sequence-start | sequence-end | mapping-start | mapping-end |
+   *  scalar | alias */
+  type: string;
+  /** 1-based start mark (0 = the event carries no position, the empty
+   *  document's null scalar) */
+  line: number;
+  column: number;
+  /** libyaml end_mark semantics: 1-based, column one past the end */
+  endLine: number;
+  endColumn: number;
+  /** scalar content; the alias NAME for type "alias" */
+  value?: string;
+  /** the node's &anchor, present when written */
+  anchor?: string;
+  /** the node's tag: the resolved core URI (!!str) or the local form
+   *  (!custom), present when written */
+  tag?: string;
+  /** scalars: plain | single | double | literal | folded (absent when
+   *  the parser recorded no style — the empty document's null scalar) */
+  style?: string;
+  /** scalars: the resolved kind (str|int|float|bool|null|timestamp|
+   *  seq|map|binary|merge|value|custom) — the typing SSOT, so hosts
+   *  never re-scan */
+  tagId?: string;
+  /** scalars: plain style (the resolver's implicit-typing trigger) */
+  implicit?: boolean;
+  /** collection starts: flow context */
+  flow?: boolean;
+  /** document start/end: a --- / ... marker was seen */
+  explicit?: boolean;
+}
+
+/** Parse YAML text and return EVERY event of the stream, in stream
+ * order (the recorder's bulk drain: one wasm crossing per stream, no
+ * per-event marshalling). Document boundaries ride the same stream —
+ * the document-start/-end events are the loadAll boundaries. options
+ * is accepted for call-site symmetry and reserved. Throws YamlError
+ * on malformed input. */
+export declare function events(
+  yaml: string,
+  options?: Record<string, unknown>,
+): Promise<YamlEvent[]>;
+
 /** Convert JSON text (or any JSON-serializable value) to the engine's
  * canonical, byte-stable YAML. */
 export declare function dump(json: string | unknown): Promise<string>;

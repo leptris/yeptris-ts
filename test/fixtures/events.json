@@ -1,0 +1,192 @@
+{
+  "vocabulary": {
+    "meta": "The normalized event vocabulary of the yeptris faces (leptris/yeptris#886 item 5). One JSON object per parse event; fields are OMITTED when absent, never null. The wasm face (this package) decodes the engine's 44-byte YeptrisEventRecord plus string arena (events.h, ABI-pinned) straight from the heap; the ruby/py/rs faces consume the SAME vocabulary over the same bytes. Expected sequences below are pinned by test/test.mjs; other runtimes copy this file verbatim.",
+    "marks": "line/column: 1-based event start. endLine/endColumn: the libyaml end_mark semantics (#179) — 1-based, endColumn one past the event's last token. 0 marks = the event carries no source position (only the empty document's null scalar). A node's start mark begins at its first property byte (& / !), not at the node content.",
+    "types": [
+      "stream-start",
+      "stream-end",
+      "document-start",
+      "document-end",
+      "sequence-start",
+      "sequence-end",
+      "mapping-start",
+      "mapping-end",
+      "scalar",
+      "alias"
+    ],
+    "props": {
+      "value": "scalar content, or the alias NAME for type alias; omitted when empty",
+      "anchor": "the node's &anchor; omitted when none",
+      "tag": "the tag as written/resolved: the resolved core URI (tag:yaml.org,2002:str for !!str) or the local form (!custom); omitted when none"
+    },
+    "scalarFields": {
+      "style": "plain | single | double | literal | folded; omitted when the parser recorded no style (the empty document's null scalar)",
+      "tagId": "the resolver's typing verdict, ALWAYS present on scalars: str | int | float | bool | null | timestamp | seq | map | binary | merge | value | custom",
+      "implicit": "true = plain style (unquoted, un-block). NOT 'untagged': a plain scalar carrying an explicit tag (!!str 42) still rides implicit. It is the resolver's implicit-typing trigger; quoted and block scalars never carry it"
+    },
+    "collectionFields": {
+      "flow": "true on collection STARTS in flow context; block starts and every END event never carry it"
+    },
+    "documentFields": {
+      "explicit": "true on document-start/-end when a --- / ... marker was seen. A document closed by the NEXT document's marker arrival ends implicit"
+    },
+    "stream": "stream-start is always first and stream-end always last; a content-less stream (empty or comment-only) frames ZERO documents",
+    "errorCases": "cases carrying an error object throw YamlError with that 1-based position instead of producing events"
+  },
+  "cases": [
+    {
+      "name": "plain scalar document",
+      "input": "hello\n",
+      "events": [
+        { "type": "stream-start", "line": 1, "column": 1, "endLine": 1, "endColumn": 1 },
+        { "type": "document-start", "line": 1, "column": 1, "endLine": 1, "endColumn": 1 },
+        { "type": "scalar", "line": 1, "column": 1, "endLine": 1, "endColumn": 6, "value": "hello", "style": "plain", "implicit": true, "tagId": "str" },
+        { "type": "document-end", "line": 2, "column": 1, "endLine": 2, "endColumn": 1 },
+        { "type": "stream-end", "line": 2, "column": 1, "endLine": 2, "endColumn": 1 }
+      ]
+    },
+    {
+      "name": "nested block map with a block sequence value",
+      "input": "name: yeptris\nlangs:\n- c\n- rust\n",
+      "events": [
+        { "type": "stream-start", "line": 1, "column": 1, "endLine": 1, "endColumn": 1 },
+        { "type": "document-start", "line": 1, "column": 1, "endLine": 1, "endColumn": 1 },
+        { "type": "mapping-start", "line": 1, "column": 1, "endLine": 1, "endColumn": 1 },
+        { "type": "scalar", "line": 1, "column": 1, "endLine": 1, "endColumn": 5, "value": "name", "style": "plain", "implicit": true, "tagId": "str" },
+        { "type": "scalar", "line": 1, "column": 7, "endLine": 1, "endColumn": 14, "value": "yeptris", "style": "plain", "implicit": true, "tagId": "str" },
+        { "type": "scalar", "line": 2, "column": 1, "endLine": 2, "endColumn": 6, "value": "langs", "style": "plain", "implicit": true, "tagId": "str" },
+        { "type": "sequence-start", "line": 3, "column": 1, "endLine": 3, "endColumn": 2 },
+        { "type": "scalar", "line": 3, "column": 3, "endLine": 3, "endColumn": 4, "value": "c", "style": "plain", "implicit": true, "tagId": "str" },
+        { "type": "scalar", "line": 4, "column": 3, "endLine": 4, "endColumn": 7, "value": "rust", "style": "plain", "implicit": true, "tagId": "str" },
+        { "type": "sequence-end", "line": 5, "column": 1, "endLine": 5, "endColumn": 1 },
+        { "type": "mapping-end", "line": 5, "column": 1, "endLine": 5, "endColumn": 1 },
+        { "type": "document-end", "line": 5, "column": 1, "endLine": 5, "endColumn": 1 },
+        { "type": "stream-end", "line": 5, "column": 1, "endLine": 5, "endColumn": 1 }
+      ]
+    },
+    {
+      "name": "flow map and flow sequence",
+      "input": "{a: 1, b: [2, 3]}\n",
+      "events": [
+        { "type": "stream-start", "line": 1, "column": 1, "endLine": 1, "endColumn": 1 },
+        { "type": "document-start", "line": 1, "column": 1, "endLine": 1, "endColumn": 1 },
+        { "type": "mapping-start", "line": 1, "column": 1, "endLine": 1, "endColumn": 2, "flow": true },
+        { "type": "scalar", "line": 1, "column": 2, "endLine": 1, "endColumn": 3, "value": "a", "style": "plain", "implicit": true, "tagId": "str" },
+        { "type": "scalar", "line": 1, "column": 5, "endLine": 1, "endColumn": 6, "value": "1", "style": "plain", "implicit": true, "tagId": "int" },
+        { "type": "scalar", "line": 1, "column": 8, "endLine": 1, "endColumn": 9, "value": "b", "style": "plain", "implicit": true, "tagId": "str" },
+        { "type": "sequence-start", "line": 1, "column": 11, "endLine": 1, "endColumn": 12, "flow": true },
+        { "type": "scalar", "line": 1, "column": 12, "endLine": 1, "endColumn": 13, "value": "2", "style": "plain", "implicit": true, "tagId": "int" },
+        { "type": "scalar", "line": 1, "column": 15, "endLine": 1, "endColumn": 16, "value": "3", "style": "plain", "implicit": true, "tagId": "int" },
+        { "type": "sequence-end", "line": 1, "column": 16, "endLine": 1, "endColumn": 17 },
+        { "type": "mapping-end", "line": 1, "column": 17, "endLine": 1, "endColumn": 18 },
+        { "type": "document-end", "line": 2, "column": 1, "endLine": 2, "endColumn": 1 },
+        { "type": "stream-end", "line": 2, "column": 1, "endLine": 2, "endColumn": 1 }
+      ]
+    },
+    {
+      "name": "quoted scalar styles lose implicit typing",
+      "input": "- 1\n- \"two\"\n- 'three'\n",
+      "events": [
+        { "type": "stream-start", "line": 1, "column": 1, "endLine": 1, "endColumn": 1 },
+        { "type": "document-start", "line": 1, "column": 1, "endLine": 1, "endColumn": 1 },
+        { "type": "sequence-start", "line": 1, "column": 1, "endLine": 1, "endColumn": 1 },
+        { "type": "scalar", "line": 1, "column": 3, "endLine": 1, "endColumn": 4, "value": "1", "style": "plain", "implicit": true, "tagId": "int" },
+        { "type": "scalar", "line": 2, "column": 3, "endLine": 2, "endColumn": 8, "value": "two", "style": "double", "tagId": "str" },
+        { "type": "scalar", "line": 3, "column": 3, "endLine": 3, "endColumn": 10, "value": "three", "style": "single", "tagId": "str" },
+        { "type": "sequence-end", "line": 4, "column": 1, "endLine": 4, "endColumn": 1 },
+        { "type": "document-end", "line": 4, "column": 1, "endLine": 4, "endColumn": 1 },
+        { "type": "stream-end", "line": 4, "column": 1, "endLine": 4, "endColumn": 1 }
+      ]
+    },
+    {
+      "name": "multi-document stream with markers and an empty document",
+      "input": "a: 1\n---\n---\nb: 2\n...\n",
+      "events": [
+        { "type": "stream-start", "line": 1, "column": 1, "endLine": 1, "endColumn": 1 },
+        { "type": "document-start", "line": 1, "column": 1, "endLine": 1, "endColumn": 1 },
+        { "type": "mapping-start", "line": 1, "column": 1, "endLine": 1, "endColumn": 1 },
+        { "type": "scalar", "line": 1, "column": 1, "endLine": 1, "endColumn": 2, "value": "a", "style": "plain", "implicit": true, "tagId": "str" },
+        { "type": "scalar", "line": 1, "column": 4, "endLine": 1, "endColumn": 5, "value": "1", "style": "plain", "implicit": true, "tagId": "int" },
+        { "type": "mapping-end", "line": 2, "column": 1, "endLine": 2, "endColumn": 1 },
+        { "type": "document-end", "line": 2, "column": 1, "endLine": 2, "endColumn": 1 },
+        { "type": "document-start", "line": 2, "column": 1, "endLine": 2, "endColumn": 4, "explicit": true },
+        { "type": "scalar", "line": 0, "column": 0, "endLine": 0, "endColumn": 0, "implicit": true, "tagId": "null" },
+        { "type": "document-end", "line": 3, "column": 1, "endLine": 3, "endColumn": 1 },
+        { "type": "document-start", "line": 3, "column": 1, "endLine": 3, "endColumn": 4, "explicit": true },
+        { "type": "mapping-start", "line": 4, "column": 1, "endLine": 4, "endColumn": 1 },
+        { "type": "scalar", "line": 4, "column": 1, "endLine": 4, "endColumn": 2, "value": "b", "style": "plain", "implicit": true, "tagId": "str" },
+        { "type": "scalar", "line": 4, "column": 4, "endLine": 4, "endColumn": 5, "value": "2", "style": "plain", "implicit": true, "tagId": "int" },
+        { "type": "mapping-end", "line": 5, "column": 1, "endLine": 5, "endColumn": 1 },
+        { "type": "document-end", "line": 5, "column": 1, "endLine": 5, "endColumn": 4, "explicit": true },
+        { "type": "stream-end", "line": 6, "column": 1, "endLine": 6, "endColumn": 1 }
+      ]
+    },
+    {
+      "name": "anchored and aliased nodes",
+      "input": "a: &x 1\nb: *x\n",
+      "events": [
+        { "type": "stream-start", "line": 1, "column": 1, "endLine": 1, "endColumn": 1 },
+        { "type": "document-start", "line": 1, "column": 1, "endLine": 1, "endColumn": 1 },
+        { "type": "mapping-start", "line": 1, "column": 1, "endLine": 1, "endColumn": 1 },
+        { "type": "scalar", "line": 1, "column": 1, "endLine": 1, "endColumn": 2, "value": "a", "style": "plain", "implicit": true, "tagId": "str" },
+        { "type": "scalar", "line": 1, "column": 4, "endLine": 1, "endColumn": 8, "value": "1", "style": "plain", "implicit": true, "tagId": "int", "anchor": "x" },
+        { "type": "scalar", "line": 2, "column": 1, "endLine": 2, "endColumn": 2, "value": "b", "style": "plain", "implicit": true, "tagId": "str" },
+        { "type": "alias", "line": 2, "column": 4, "endLine": 2, "endColumn": 6, "value": "x" },
+        { "type": "mapping-end", "line": 3, "column": 1, "endLine": 3, "endColumn": 1 },
+        { "type": "document-end", "line": 3, "column": 1, "endLine": 3, "endColumn": 1 },
+        { "type": "stream-end", "line": 3, "column": 1, "endLine": 3, "endColumn": 1 }
+      ]
+    },
+    {
+      "name": "tagged scalars: resolved core URI and local tag",
+      "input": "k: !!str 42\nj: !custom v\n",
+      "events": [
+        { "type": "stream-start", "line": 1, "column": 1, "endLine": 1, "endColumn": 1 },
+        { "type": "document-start", "line": 1, "column": 1, "endLine": 1, "endColumn": 1 },
+        { "type": "mapping-start", "line": 1, "column": 1, "endLine": 1, "endColumn": 1 },
+        { "type": "scalar", "line": 1, "column": 1, "endLine": 1, "endColumn": 2, "value": "k", "style": "plain", "implicit": true, "tagId": "str" },
+        { "type": "scalar", "line": 1, "column": 4, "endLine": 1, "endColumn": 12, "value": "42", "style": "plain", "implicit": true, "tag": "tag:yaml.org,2002:str", "tagId": "str" },
+        { "type": "scalar", "line": 2, "column": 1, "endLine": 2, "endColumn": 2, "value": "j", "style": "plain", "implicit": true, "tagId": "str" },
+        { "type": "scalar", "line": 2, "column": 4, "endLine": 2, "endColumn": 13, "value": "v", "style": "plain", "implicit": true, "tag": "!custom", "tagId": "custom" },
+        { "type": "mapping-end", "line": 3, "column": 1, "endLine": 3, "endColumn": 1 },
+        { "type": "document-end", "line": 3, "column": 1, "endLine": 3, "endColumn": 1 },
+        { "type": "stream-end", "line": 3, "column": 1, "endLine": 3, "endColumn": 1 }
+      ]
+    },
+    {
+      "name": "literal block scalar keeps newlines and its style",
+      "input": "k: |\n  l1\n  l2\n",
+      "events": [
+        { "type": "stream-start", "line": 1, "column": 1, "endLine": 1, "endColumn": 1 },
+        { "type": "document-start", "line": 1, "column": 1, "endLine": 1, "endColumn": 1 },
+        { "type": "mapping-start", "line": 1, "column": 1, "endLine": 1, "endColumn": 1 },
+        { "type": "scalar", "line": 1, "column": 1, "endLine": 1, "endColumn": 2, "value": "k", "style": "plain", "implicit": true, "tagId": "str" },
+        { "type": "scalar", "line": 1, "column": 4, "endLine": 4, "endColumn": 1, "value": "l1\nl2\n", "style": "literal", "tagId": "str" },
+        { "type": "mapping-end", "line": 4, "column": 1, "endLine": 4, "endColumn": 1 },
+        { "type": "document-end", "line": 4, "column": 1, "endLine": 4, "endColumn": 1 },
+        { "type": "stream-end", "line": 4, "column": 1, "endLine": 4, "endColumn": 1 }
+      ]
+    },
+    {
+      "name": "empty stream frames zero documents",
+      "input": "",
+      "events": [
+        { "type": "stream-start", "line": 1, "column": 1, "endLine": 1, "endColumn": 1 },
+        { "type": "stream-end", "line": 1, "column": 1, "endLine": 1, "endColumn": 1 }
+      ]
+    },
+    {
+      "name": "comment-only stream frames zero documents",
+      "input": "# just a comment\n",
+      "events": [
+        { "type": "stream-start", "line": 1, "column": 1, "endLine": 1, "endColumn": 1 },
+        { "type": "stream-end", "line": 2, "column": 1, "endLine": 2, "endColumn": 1 }
+      ]
+    },
+    {
+      "name": "malformed stream raises instead of producing events",
+      "input": "a: [1,\n---\nb: 2\n",
+      "error": { "line": 2, "column": 1 }
+    }
+  ]
+}

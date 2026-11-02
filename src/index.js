@@ -62,6 +62,12 @@ async function mod() {
     "_yeptris_wasm_load",
     "_yeptris_wasm_load_all",
     "_yeptris_wasm_dump",
+    "_yeptris_wasm_events",
+    "_yeptris_wasm_event_records",
+    "_yeptris_wasm_event_count",
+    "_yeptris_wasm_event_arena",
+    "_yeptris_wasm_event_arena_len",
+    "_yeptris_wasm_events_free",
     "_yeptris_wasm_out",
     "_yeptris_wasm_out_len",
     "_yeptris_wasm_out_free",
@@ -105,6 +111,167 @@ export async function loadAll(yaml, options) {
 export async function loadJSON(yaml) {
   const m = await mod();
   return run(m, m._yeptris_wasm_load, yaml);
+}
+
+// ---- the event face (the recorder's bulk drain) -------------------------
+//
+// The engine ships three event models over the one parse: push (a
+// callback per event), pull (a StAX cursor) and the recorder (fixed
+// 44-byte records plus one copied string arena). Across the wasm
+// boundary the recorder wins: the whole stream drains as TWO spans
+// read straight from the heap — O(1) crossings, no per-event callback
+// marshalling. The record layout is ABI-pinned (events.h, 44B) and
+// this decoder is the JS mirror of the ctypes/FFI readers the
+// ruby/py/rs faces use over the same bytes.
+
+// YeptrisEventType (events.h, ABI-pinned order).
+const EV_KINDS = {
+  1: "stream-start",
+  2: "stream-end",
+  3: "document-start",
+  4: "document-end",
+  5: "sequence-start",
+  6: "sequence-end",
+  7: "mapping-start",
+  8: "mapping-end",
+  9: "scalar",
+  10: "alias",
+};
+
+// YeptrisScalarStyle (dom.h). 0 = ANY ("no recorded style" — the empty
+// document's null scalar) and spells as an ABSENT style, not a lie.
+const EV_STYLES = {
+  1: "plain",
+  2: "single",
+  3: "double",
+  4: "literal",
+  5: "folded",
+};
+
+// YeptrisTagId (resolve.h) — the resolver's typing verdict, spelled as
+// the kind name (the same vocabulary ruby/py/rs consume).
+const EV_TAG_IDS = {
+  0: "str",
+  1: "int",
+  2: "float",
+  3: "bool",
+  4: "null",
+  5: "timestamp",
+  6: "seq",
+  7: "map",
+  8: "binary",
+  9: "merge",
+  10: "value",
+  11: "custom",
+};
+
+// YEPTRIS_EF_* flag bits (events.h).
+const EF_FLOW = 1; // collection in flow style
+const EF_EXPLICIT = 2; // document with a --- / ... marker
+const EF_IMPLICIT = 4; // plain (unquoted, un-block) scalar style
+
+const EV_RECORD_SIZE = 44; // sizeof(YeptrisEventRecord), ABI-pinned
+
+let utf8Decoder = null;
+
+function decodeArena(u8, off, len) {
+  if (utf8Decoder === null) {
+    utf8Decoder = new TextDecoder("utf-8");
+  }
+  return utf8Decoder.decode(u8.subarray(off, off + len));
+}
+
+/** Parse YAML text and return EVERY event of the stream as an array
+ * of plain objects, in stream order (leptris/yeptris#886). One event
+ * is:
+ *
+ *   { type: "stream-start" | "stream-end" | "document-start" |
+ *           "document-end" | "sequence-start" | "sequence-end" |
+ *           "mapping-start" | "mapping-end" | "scalar" | "alias",
+ *     line, column,        // 1-based start mark (0 = no position)
+ *     endLine, endColumn,  // libyaml end_mark: col one past the end
+ *     value?,              // scalar content; the alias NAME for alias
+ *     anchor?, tag?,       // node properties, present when written
+ *     style?,              // scalars: plain|single|double|literal|folded
+ *     tagId?,              // scalars: the resolved kind (str|int|...)
+ *     implicit?,           // scalars: plain style (the typing trigger)
+ *     flow?,               // collection starts: flow context
+ *     explicit? }          // document start/end: --- / ... marker seen
+ *
+ * Absent properties are omitted, never null. The faces of
+ * ruby/py/rs consume the same normalized vocabulary (see
+ * test/fixtures/events.json, whose header documents it as data).
+ * options is accepted for call-site symmetry and reserved. Throws
+ * YamlError on malformed input (position from the recorder's status;
+ * its message is the generic "parse failed" — the recorder carries
+ * status + position, not the error text). */
+export async function events(yaml, options) {
+  const m = await mod();
+  const [ptr, len] = cstr(m, yaml);
+  try {
+    const st = m._yeptris_wasm_events(ptr, len);
+    if (st !== 0) {
+      throw new YamlError(
+        m.UTF8ToString(m._yeptris_wasm_last_error()),
+        m._yeptris_wasm_last_error_line(),
+        m._yeptris_wasm_last_error_column());
+    }
+    const n = m._yeptris_wasm_event_count();
+    const recs = m._yeptris_wasm_event_records();
+    const arena = m._yeptris_wasm_event_arena();
+    // Heap views fetched AFTER the call: the feed may have grown the
+    // memory, and the exported views are re-bound on growth.
+    const u8 = m.HEAPU8;
+    const u32 = m.HEAPU32;
+    const out = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const base = recs + i * EV_RECORD_SIZE;
+      const p = base >> 2;
+      const type = u8[base];
+      const flags = u8[base + 2];
+      const ev = {
+        type: EV_KINDS[type],
+        line: u32[p + 1],
+        column: u32[p + 2],
+        endLine: u32[p + 3],
+        endColumn: u32[p + 4],
+      };
+      const valueLen = u32[p + 6];
+      if (valueLen !== 0) {
+        ev.value = decodeArena(u8, arena + u32[p + 5], valueLen);
+      }
+      const anchorLen = u32[p + 8];
+      if (anchorLen !== 0) {
+        ev.anchor = decodeArena(u8, arena + u32[p + 7], anchorLen);
+      }
+      const tagLen = u32[p + 10];
+      if (tagLen !== 0) {
+        ev.tag = decodeArena(u8, arena + u32[p + 9], tagLen);
+      }
+      if (type === 9) { // scalar
+        const style = u8[base + 1];
+        if (style !== 0) {
+          ev.style = EV_STYLES[style];
+        }
+        if ((flags & EF_IMPLICIT) !== 0) {
+          ev.implicit = true;
+        }
+        ev.tagId = EV_TAG_IDS[u8[base + 3]];
+      }
+      if ((flags & EF_FLOW) !== 0) {
+        ev.flow = true;
+      }
+      if ((type === 3 || type === 4) && (flags & EF_EXPLICIT) !== 0) {
+        ev.explicit = true;
+      }
+      out[i] = ev;
+    }
+    return out;
+  } finally {
+    // the drain is decoded: release the recorder (nothing retained
+    // past this call — the answer left the heap as JS objects)
+    m._yeptris_wasm_events_free();
+  }
 }
 
 /** Convert JSON text (or any JSON-serializable value) to the engine's

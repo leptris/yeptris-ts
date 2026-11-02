@@ -7,9 +7,9 @@ Part of the yeptris program: *the best (multiple dimensions)
 YAML/JSON parser/builder ever* — conformance, performance,
 safety/hardening, API surfaces, transport correctness, and trust,
 held simultaneously, in C, Ruby, Rust, and JS. This binding is the
-thinnest surface (the WASM module); the recorder bulk-drain and
-iterparse are planned next (the engine's PLAN.md, "The best-ever
-program").
+thinnest surface (the WASM module); the recorder bulk-drain rides the
+`events()` face, iterparse is planned next (the engine's PLAN.md, "The
+best-ever program").
 
 ```js
 import { load, dump } from "yeptris";
@@ -27,6 +27,15 @@ const yaml = await dump({ name: "yeptris", langs: ["c", "rust"] });
 - `loadAll(yaml, options?)` — parse a multi-document stream to an
   array of every document, in stream order (`js-yaml` parity; an
   empty stream answers `[]`).
+- `events(yaml, options?)` — every event of the stream as an array of
+  plain objects, in stream order: the engine's recorder bulk drain
+  (one wasm crossing per stream — the fixed 44-byte event records and
+  the string arena are read straight from the heap, no per-event
+  marshalling). Document boundaries ride the same stream: the
+  `document-start`/`-end` events are the `loadAll` boundaries. The
+  normalized event vocabulary is shared with the ruby/py/rs faces and
+  documented as data in
+  [`test/fixtures/events.json`](test/fixtures/events.json).
 - `loadJSON(yaml)` — the engine's canonical JSON string.
 - `dump(json)` — JSON text (or any JSON-serializable value) to
   canonical YAML; JSON is a subset of YAML 1.2 flow, so the one parse

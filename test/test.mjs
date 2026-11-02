@@ -1,7 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
-import { load, loadAll, loadJSON, dump, version } from "../src/index.js";
+import { load, loadAll, loadJSON, dump, version, events } from "../src/index.js";
+
+// The cross-runtime event fixture set (leptris/yeptris#886 item 5):
+// canonical inputs + their expected normalized event sequences, one
+// vocabulary shared with the ruby/py/rs faces. The vocabulary is
+// documented as data in the file itself.
+const FIXTURES = JSON.parse(
+  readFileSync(new URL("./fixtures/events.json", import.meta.url), "utf8"));
 
 test("version reports the engine", async () => {
   const v = await version();
@@ -111,10 +119,95 @@ test("round trip: yaml -> js -> yaml -> js is stable", async () => {
   assert.deepEqual(twice, once);
 });
 
+// ---- the event face (the recorder's bulk drain) ----
+
+for (const fixture of FIXTURES.cases) {
+  test(`events fixture: ${fixture.name}`, async () => {
+    if (fixture.error) {
+      await assert.rejects(
+        () => events(fixture.input),
+        (e) =>
+          e.name === "YamlError" &&
+          e.line === fixture.error.line &&
+          e.column === fixture.error.column);
+    } else {
+      assert.deepEqual(await events(fixture.input), fixture.events);
+    }
+  });
+}
+
+test("events: document boundaries match loadAll for every fixture", async () => {
+  // the same law in both faces: one document-start per loadAll element
+  for (const fixture of FIXTURES.cases) {
+    if (fixture.error) continue;
+    const evs = await events(fixture.input);
+    const docs = evs.filter((e) => e.type === "document-start");
+    const all = await loadAll(fixture.input);
+    assert.equal(all.length, docs.length,
+                 `${fixture.name}: document-start count != loadAll length`);
+  }
+});
+
+test("events: stream-start is first and stream-end is last", async () => {
+  for (const fixture of FIXTURES.cases) {
+    if (fixture.error) continue;
+    const evs = await events(fixture.input);
+    assert.equal(evs[0].type, "stream-start", fixture.name);
+    assert.equal(evs[evs.length - 1].type, "stream-end", fixture.name);
+  }
+});
+
+test("events: every scalar names its resolved kind", async () => {
+  // a sequence: keys are scalars too, so a map would fold them in
+  const evs = await events("- 42\n- text\n- 1.5\n- true\n- null\n");
+  const kinds = evs.filter((e) => e.type === "scalar").map((e) => e.tagId);
+  assert.deepEqual(kinds, ["int", "str", "float", "bool", "null"]);
+});
+
+test("events: aliases carry the alias name and anchors the anchor", async () => {
+  const evs = await events("a: &x 1\nb: *x\n");
+  const anchor = evs.find((e) => e.anchor === "x");
+  assert.equal(anchor.type, "scalar");
+  assert.equal(anchor.value, "1");
+  const alias = evs.find((e) => e.type === "alias");
+  assert.equal(alias.value, "x");
+  assert.equal(alias.tagId, undefined);
+  assert.equal(alias.style, undefined);
+});
+
+test("events: options is accepted and reserved", async () => {
+  // stream/doc/map start+end, two scalars
+  assert.equal((await events("k: v\n", {})).length, 8);
+});
+
+test("events: survives heap growth mid-call (the views re-bind on growth)", async () => {
+  // ALLOW_MEMORY_GROWTH swaps the wasm buffer on demand; the decoder
+  // must fetch the exported views AFTER the wasm call, never hold a
+  // stale one across calls. A multi-MB stream forces the growth.
+  const big = "k: \"" + "x".repeat(2 * 1024 * 1024) + "\"\n";
+  const evs = await events(big);
+  const scalar = evs.find((e) => e.type === "scalar" && e.value && e.value.length > 1000);
+  assert.equal(scalar.value.length, 2 * 1024 * 1024);
+  assert.equal(scalar.style, "double");
+});
+
+test("events: the drain frees after every call (success and error)", async () => {
+  const { wasmModule } = await import("../src/index.js");
+  const mod = await wasmModule();
+  await events("k: v\n");
+  assert.equal(mod._yeptris_wasm_event_count(), 0, "drain not freed after events");
+  assert.equal(mod._yeptris_wasm_event_records(), 0);
+  await assert.rejects(() => events("k: [unclosed\n"));
+  assert.equal(mod._yeptris_wasm_event_count(), 0, "drain not freed after an error");
+});
+
 test("module guard: the built dist carries every guarded export", async () => {
   const factory = (await import("../dist/yeptris.mjs")).default;
   const m = await factory();
   for (const fn of ["_yeptris_wasm_load", "_yeptris_wasm_load_all", "_yeptris_wasm_dump",
+                    "_yeptris_wasm_events", "_yeptris_wasm_event_records",
+                    "_yeptris_wasm_event_count", "_yeptris_wasm_event_arena",
+                    "_yeptris_wasm_event_arena_len", "_yeptris_wasm_events_free",
                     "_yeptris_wasm_out", "_yeptris_wasm_last_error", "_yeptris_wasm_free",
                     "_malloc"]) {
     assert.equal(typeof m[fn], "function", `${fn} must be exported`);
