@@ -112,6 +112,72 @@ test("dump: JSON text to canonical YAML", async () => {
   assert.deepEqual(back, { a: { b: [true, null] } });
 });
 
+// ---- dump options (js-yaml parity over emit.h's yeptris_emit_options) ----
+
+// 13 flow items: the emitter folds past a line's width, so the default
+// (80) wraps while a huge width cannot
+const LONG_ROW = {
+  k: ["aaaa", "bbbb", "cccc", "dddd", "eeee", "ffff", "gggg", "hhhh",
+      "iiii", "jjjj", "kkkk", "llll", "mmmm"],
+};
+
+test("dump: lineWidth folds flow collections past the column", async () => {
+  const folded = await dump(LONG_ROW); // the 80 default folds
+  const wide = await dump(LONG_ROW, { lineWidth: 100000 });
+  assert.notEqual(folded, wide, "the default must fold a long flow seq");
+  assert.ok(folded.includes("\n"), "the folded form carries newlines");
+  // the emitter always writes a trailing newline — strip it before
+  // judging interior folds
+  assert.ok(!wide.trimEnd().includes("\n"), "a huge width must not fold");
+  assert.deepEqual(await load(folded), LONG_ROW, "folded form re-parses");
+  assert.deepEqual(await load(wide), LONG_ROW, "unfolded form re-parses");
+});
+
+test("dump: lineWidth -1 disables folding (js-yaml's unlimited)", async () => {
+  const unlim = await dump(LONG_ROW, { lineWidth: -1 });
+  assert.equal(unlim, await dump(LONG_ROW, { lineWidth: 100000 }));
+});
+
+test("dump: a narrower width folds tighter", async () => {
+  const narrow = await dump(LONG_ROW, { lineWidth: 20 });
+  const folded = await dump(LONG_ROW); // the 80 default
+  assert.ok(
+    narrow.split("\n").length > folded.split("\n").length,
+    `width 20 must fold tighter than 80:\n${narrow}`);
+  assert.deepEqual(await load(narrow), LONG_ROW, "the tight fold re-parses");
+});
+
+test("dump: canonical rides the engine's fixed form", async () => {
+  const doc = { a: 1, b: "x", c: [1, 2] };
+  const canon = await dump(doc, { canonical: true });
+  assert.notEqual(canon, await dump(doc), "canonical differs from fidelity mode");
+  assert.ok(canon.includes("{"), "canonical spells flow collections");
+  assert.ok(canon.includes('"x"'), "canonical quotes strings");
+  // the canonical law: a parse of the output re-serializes byte-identically
+  assert.equal(await dump(await load(canon), { canonical: true }), canon);
+});
+
+test("dump: default options match the no-options dump byte-for-byte", async () => {
+  // the wasm bridge's defaults (0, 0) are the library defaults: the
+  // options call must be a drop-in for the plain one
+  const doc = { a: [1, 2], b: { c: null }, d: "x".repeat(200) };
+  assert.equal(await dump(doc, {}), await dump(doc));
+  assert.equal(await dump(doc, { lineWidth: 80 }), await dump(doc));
+  assert.equal(await dump(doc, null), await dump(doc));
+});
+
+test("dump: option validation", async () => {
+  // known keys are typed strictly
+  await assert.rejects(() => dump({}, { lineWidth: "80" }), TypeError);
+  await assert.rejects(() => dump({}, { lineWidth: 1.5 }), TypeError);
+  await assert.rejects(() => dump({}, { lineWidth: 0 }), TypeError);
+  await assert.rejects(() => dump({}, { lineWidth: -2 }), TypeError);
+  await assert.rejects(() => dump({}, { canonical: 1 }), TypeError);
+  // indent/flowLevel have no engine option: rejected, never ignored
+  await assert.rejects(() => dump({}, { indent: 4 }), TypeError);
+  await assert.rejects(() => dump({}, { flowLevel: 1 }), TypeError);
+});
+
 test("round trip: yaml -> js -> yaml -> js is stable", async () => {
   const src = "a:\n  b:\n  - 1\n  - x: y\n";
   const once = await load(src);
@@ -205,6 +271,7 @@ test("module guard: the built dist carries every guarded export", async () => {
   const factory = (await import("../dist/yeptris.mjs")).default;
   const m = await factory();
   for (const fn of ["_yeptris_wasm_load", "_yeptris_wasm_load_all", "_yeptris_wasm_dump",
+                    "_yeptris_wasm_dump_ex",
                     "_yeptris_wasm_events", "_yeptris_wasm_event_records",
                     "_yeptris_wasm_event_count", "_yeptris_wasm_event_arena",
                     "_yeptris_wasm_event_arena_len", "_yeptris_wasm_events_free",

@@ -21,14 +21,14 @@ class YamlError extends Error {
   }
 }
 
-function run(mod, fn, input) {
+function run(mod, fn, input, ...args) {
   const [ptr, len] = cstr(mod, input);
   try {
     // len is the UTF-8 byte count: input.length counts UTF-16 code
     // units, which is strictly shorter than the wire bytes for any
     // non-ASCII text (é is 1 unit / 2 bytes) — every such document
     // parsed truncated
-    const st = fn(ptr, len);
+    const st = fn(ptr, len, ...args);
     if (st !== 0) {
       const msg = mod.UTF8ToString(mod._yeptris_wasm_last_error());
       throw new YamlError(
@@ -62,6 +62,7 @@ async function mod() {
     "_yeptris_wasm_load",
     "_yeptris_wasm_load_all",
     "_yeptris_wasm_dump",
+    "_yeptris_wasm_dump_ex",
     "_yeptris_wasm_events",
     "_yeptris_wasm_event_records",
     "_yeptris_wasm_event_count",
@@ -275,12 +276,55 @@ export async function events(yaml, options) {
 }
 
 /** Convert JSON text (or any JSON-serializable value) to the engine's
- * canonical, byte-stable YAML. JSON is a subset of YAML 1.2 flow, so
- * the one parse engine takes it. */
-export async function dump(json) {
+ * byte-stable YAML. JSON is a subset of YAML 1.2 flow, so the one
+ * parse engine takes it.
+ *
+ * options (js-yaml parity names over emit.h's yeptris_emit_options):
+ *   lineWidth — fold flow collections once the current line exceeds
+ *     this column (the engine's best_width). Default: the engine
+ *     default (80); -1 disables folding.
+ *   canonical — the engine's fixed form: flow collections, quoted
+ *     strings, typed words, shortest floats — a parse of the output
+ *     re-serializes byte-identically. Default: false.
+ *
+ * `indent` and `flowLevel` have no engine option (the block indent is
+ * fixed at 2; there is no flow-level override) — they are not accepted
+ * here rather than silently ignored. Throws TypeError on a mistyped
+ * known option; throws YamlError on malformed JSON input. */
+export async function dump(json, options) {
   const m = await mod();
   const text = typeof json === "string" ? json : JSON.stringify(json);
-  return run(m, m._yeptris_wasm_dump, text);
+  let canonical = 0;
+  let lineWidth = 0; // <= 0 rides the library default (emit.h)
+  if (options !== undefined && options !== null) {
+    if (typeof options !== "object") {
+      throw new TypeError("yeptris: dump options must be an object");
+    }
+    for (const key of Object.keys(options)) {
+      if (key !== "lineWidth" && key !== "canonical") {
+        throw new TypeError(
+          `yeptris: dump option "${key}" is not supported ` +
+            `(the engine surface is lineWidth + canonical)`);
+      }
+    }
+    if (options.lineWidth !== undefined) {
+      const w = options.lineWidth;
+      if (typeof w !== "number" || !Number.isInteger(w) || w === 0 || w < -1) {
+        throw new TypeError(
+          "yeptris: dump option lineWidth must be an integer > 0 (or -1 for no folding)");
+      }
+      // -1 is js-yaml's "unlimited": the engine folds only past the
+      // width, so the largest width IS "never fold"
+      lineWidth = w === -1 ? 0x7fffffff : w;
+    }
+    if (options.canonical !== undefined) {
+      if (typeof options.canonical !== "boolean") {
+        throw new TypeError("yeptris: dump option canonical must be a boolean");
+      }
+      canonical = options.canonical ? 1 : 0;
+    }
+  }
+  return run(m, m._yeptris_wasm_dump_ex, text, canonical, lineWidth);
 }
 
 /** The libyeptris version string. */

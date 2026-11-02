@@ -334,19 +334,29 @@ int yeptris_wasm_load_all(const char *data, size_t len) {
     return rc;
 }
 
-/* JSON in -> canonical YAML out (JSON is a subset of YAML 1.2 flow, so
- * the one parse engine takes it; the emitter's canonical form is
- * byte-stable across round trips). */
+/* The dump-options face (emit.h's yeptris_emit_options): canonical
+ * selects the engine's fixed form (flow collections, quoted strings,
+ * typed words, shortest floats); best_width folds flow collections
+ * after a value once the line exceeds it (<= 0 rides the library
+ * default, 80 — the libyaml parity). The defaults (0, 0) are
+ * byte-identical to the no-options yeptris_serialize: opts_width
+ * answers 80 for best_width <= 0 and canonical 0 is the fidelity
+ * mode. */
 EMSCRIPTEN_KEEPALIVE
-int yeptris_wasm_dump(const char *data, size_t len) {
+int yeptris_wasm_dump_ex(const char *data, size_t len, int canonical, int best_width) {
     YeptrisStatus st = YEPTRIS_OK;
     YeptrisDocument doc = yeptris_parse(data, len, &st);
     if (doc == NULL || st != YEPTRIS_OK) {
         capture_error();
         return (int)st;
     }
+    yeptris_emit_options opts;
+    memset(&opts, 0, sizeof opts);
+    opts.size = (uint32_t)sizeof opts; /* the size-versioned contract */
+    opts.canonical = canonical;
+    opts.best_width = best_width;
     size_t out_len = 0;
-    char *out = yeptris_serialize(doc, &out_len);
+    char *out = yeptris_serialize_ex(doc, &opts, &out_len);
     yeptris_document_free(doc);
     if (out == NULL) {
         snprintf(last_error, sizeof last_error, "serialization failed");
@@ -357,6 +367,14 @@ int yeptris_wasm_dump(const char *data, size_t len) {
     g_out = out;
     g_out_len = out_len;
     return YEPTRIS_OK;
+}
+
+/* JSON in -> canonical YAML out (JSON is a subset of YAML 1.2 flow, so
+ * the one parse engine takes it; the emitter's canonical form is
+ * byte-stable across round trips). */
+EMSCRIPTEN_KEEPALIVE
+int yeptris_wasm_dump(const char *data, size_t len) {
+    return yeptris_wasm_dump_ex(data, len, 0, 0);
 }
 
 EMSCRIPTEN_KEEPALIVE

@@ -69,9 +69,30 @@ export declare function events(
   options?: Record<string, unknown>,
 ): Promise<YamlEvent[]>;
 
+/** Options for dump (js-yaml parity names over emit.h's
+ * yeptris_emit_options). `indent` and `flowLevel` have no engine
+ * option — the block indent is fixed at 2 and there is no flow-level
+ * override — so they are not in the surface rather than silently
+ * ignored. */
+export interface DumpOptions {
+  /** Fold flow collections once the current line exceeds this column
+   *  (the engine's best_width; the emitter wraps after a value).
+   *  Default: the engine default (80). -1 disables folding. */
+  lineWidth?: number;
+  /** The engine's fixed form: flow collections, quoted strings, typed
+   *  words, shortest floats — a parse of the output re-serializes
+   *  byte-identically. Default: false (the recorded-style fidelity
+   *  mode). */
+  canonical?: boolean;
+}
+
 /** Convert JSON text (or any JSON-serializable value) to the engine's
- * canonical, byte-stable YAML. */
-export declare function dump(json: string | unknown): Promise<string>;
+ * byte-stable YAML. Throws TypeError on an unsupported or mistyped
+ * option. */
+export declare function dump(
+  json: string | unknown,
+  options?: DumpOptions,
+): Promise<string>;
 
 /** The libyeptris version string. */
 export declare function version(): Promise<string>;
