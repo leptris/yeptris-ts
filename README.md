@@ -37,9 +37,15 @@ const yaml = await dump({ name: "yeptris", langs: ["c", "rust"] });
   documented as data in
   [`test/fixtures/events.json`](test/fixtures/events.json).
 - `loadJSON(yaml)` — the engine's canonical JSON string.
-- `dump(json)` — JSON text (or any JSON-serializable value) to
-  canonical YAML; JSON is a subset of YAML 1.2 flow, so the one parse
-  engine takes it.
+- `dump(json, options?)` — JSON text (or any JSON-serializable value)
+  to YAML; JSON is a subset of YAML 1.2 flow, so the one parse engine
+  takes it. Options (js-yaml parity names over the engine's
+  `yeptris_emit_options`): `lineWidth` folds flow collections past
+  that column (default 80, `-1` disables folding) and `canonical`
+  rides the engine's fixed form (flow collections, quoted strings,
+  typed words, shortest floats). `indent`/`flowLevel` have no engine
+  option and are rejected, never silently ignored; any mistyped option
+  throws `TypeError`.
 
 The same model as [teptris-wasm](https://github.com/leptris/teptris-wasm):
 a contained C bridge (`src/yeptris_wasm.c`) over the engine's
