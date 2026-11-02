@@ -51,7 +51,11 @@ jobs:
         # publish.yml, not release.yml) before the first OIDC dispatch.
         run: npm publish
       - name: Version
-        run: echo "V=$(node -p 'require(\"./package.json\").version')" >> "$GITHUB_ENV"
+        run: |
+          V=$(node -p 'require("./package.json").version')
+          echo "V=$V" >> "$GITHUB_ENV"
+          echo "releasing v$V"
+
       - name: Tag and release
         run: gh release create "v$V" dist/yeptris.mjs dist/yeptris.wasm --generate-notes --title "yeptris v$V"
         env:
