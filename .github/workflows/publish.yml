@@ -14,6 +14,13 @@ permissions:
 on:
   workflow_dispatch:
 
+env:
+  # The engine source the wasm is built from. PINNED to a release tag:
+  # a bad engine main must not break a publish (the pin law). BUMP
+  # WITH EACH ENGINE WAVE: every engine release train re-points this
+  # at the new tag BEFORE dispatching this workflow.
+  ENGINE_REF: refs/tags/v0.6.57
+
 jobs:
   publish:
     name: build + npm publish
@@ -24,7 +31,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: leptris/yeptris
-          ref: main
+          ref: ${{ env.ENGINE_REF }}
           path: engine
       - uses: mymindstorm/setup-emsdk@v14
         with:
