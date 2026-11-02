@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { load, loadJSON, dump, version } from "../src/index.js";
+import { load, loadAll, loadJSON, dump, version } from "../src/index.js";
 
 test("version reports the engine", async () => {
   const v = await version();
@@ -26,6 +26,65 @@ test("load: malformed input carries line/column", async () => {
   await assert.rejects(
     () => load("a: [1,\n"),
     (e) => e.name === "YamlError" && e.line >= 1);
+});
+
+// ---- multi-document streams (loadAll) ----
+
+test("loadAll: a multi-document stream yields every document", async () => {
+  assert.deepEqual(await loadAll("a: 1\n---\nb: 2\n"), [{ a: 1 }, { b: 2 }]);
+});
+
+test("loadAll: a single-document stream yields a length-1 array", async () => {
+  assert.deepEqual(await loadAll("name: yeptris\n"), [{ name: "yeptris" }]);
+});
+
+test("loadAll: empty and comment-only streams yield an empty array", async () => {
+  // the engine answers a content-less stream with zero documents
+  assert.deepEqual(await loadAll(""), []);
+  assert.deepEqual(await loadAll("# just a comment\n"), []);
+});
+
+test("loadAll: empty documents ride the stream as null", async () => {
+  assert.deepEqual(await loadAll("---\n---\n"), [null, null]);
+  assert.deepEqual(await loadAll("a: 1\n---\n"), [{ a: 1 }, null]);
+  assert.deepEqual(await loadAll("a: 1\n--- # explicit\n---\nb: 2\n"),
+                   [{ a: 1 }, null, { b: 2 }]);
+});
+
+test("loadAll: scalars, sequences and styles mirror load()", async () => {
+  assert.deepEqual(await loadAll("1\n---\n2\n---\n3\n"), [1, 2, 3]);
+  assert.deepEqual(await loadAll("- 1\n- 2\n---\n- 3\n"), [[1, 2], [3]]);
+  // plain typed vs quoted/tagged forced-string, block scalars kept
+  assert.deepEqual(
+    await loadAll('a: !!str 42\n---\nb: "42"\n---\nc: |\n  l1\n'),
+    [{ a: "42" }, { b: "42" }, { c: "l1\n" }]);
+});
+
+test("loadAll: aliases project to null and anchors drop (the JSON law)", async () => {
+  // the JSON projection dereferences aliases to null (bounded — the
+  // emitter's emit_alias_ex law); anchors spell nothing in JSON
+  const src = "a: &x 1\nb: *x\nc:\n- k\n- *x\n";
+  assert.deepEqual(await load(src), { a: 1, b: null, c: ["k", null] });
+  assert.deepEqual(await loadAll(src), [{ a: 1, b: null, c: ["k", null] }]);
+});
+
+test("loadAll: options is accepted and reserved", async () => {
+  assert.deepEqual(await loadAll("a: 1\n", {}), [{ a: 1 }]);
+});
+
+test("loadAll: malformed input carries line/column", async () => {
+  await assert.rejects(
+    () => loadAll("a: [1,\n---\nb: 2\n"),
+    (e) => e.name === "YamlError" && e.line >= 1);
+});
+
+test("load: a multi-document stream answers with the FIRST document", async () => {
+  // pinned: load() is the single-document form and json.h's contract
+  // is "serializes the document's FIRST document". Before the fix the
+  // multi-doc forest serialized EMPTY and load() died in JSON.parse
+  // with a raw SyntaxError (not a YamlError).
+  assert.deepEqual(await load("a: 1\n---\nb: 2\n"), { a: 1 });
+  assert.equal(await loadJSON("a: 1\n---\nb: 2\n"), '{"a": 1}\n');
 });
 
 test("loadJSON: the canonical JSON string", async () => {
@@ -55,8 +114,9 @@ test("round trip: yaml -> js -> yaml -> js is stable", async () => {
 test("module guard: the built dist carries every guarded export", async () => {
   const factory = (await import("../dist/yeptris.mjs")).default;
   const m = await factory();
-  for (const fn of ["_yeptris_wasm_load", "_yeptris_wasm_dump", "_yeptris_wasm_out",
-                    "_yeptris_wasm_last_error", "_yeptris_wasm_free", "_malloc"]) {
+  for (const fn of ["_yeptris_wasm_load", "_yeptris_wasm_load_all", "_yeptris_wasm_dump",
+                    "_yeptris_wasm_out", "_yeptris_wasm_last_error", "_yeptris_wasm_free",
+                    "_malloc"]) {
     assert.equal(typeof m[fn], "function", `${fn} must be exported`);
   }
 });

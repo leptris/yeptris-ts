@@ -22,7 +22,11 @@ const yaml = await dump({ name: "yeptris", langs: ["c", "rust"] });
 ```
 
 - `load(yaml)` — parse to a JavaScript value (malformed input throws
-  `YamlError` with line/column).
+  `YamlError` with line/column). A multi-document stream answers with
+  the FIRST document.
+- `loadAll(yaml, options?)` — parse a multi-document stream to an
+  array of every document, in stream order (`js-yaml` parity; an
+  empty stream answers `[]`).
 - `loadJSON(yaml)` — the engine's canonical JSON string.
 - `dump(json)` — JSON text (or any JSON-serializable value) to
   canonical YAML; JSON is a subset of YAML 1.2 flow, so the one parse

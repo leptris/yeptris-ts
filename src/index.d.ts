@@ -6,8 +6,18 @@ export declare class YamlError extends Error {
 
 /** Parse YAML text and return the document as a JavaScript value
  * (the engine's canonical JSON, JSON.parse'd). Throws YamlError with
- * line/column on malformed input. */
+ * line/column on malformed input. A multi-document stream answers
+ * with the FIRST document; every document comes from loadAll. */
 export declare function load(yaml: string): Promise<unknown>;
+
+/** Parse a multi-document YAML stream and return EVERY document as a
+ * JavaScript value, in stream order. An empty or comment-only stream
+ * answers []. options is reserved (no options today). Throws
+ * YamlError with line/column on malformed input. */
+export declare function loadAll(
+  yaml: string,
+  options?: Record<string, unknown>,
+): Promise<unknown[]>;
 
 /** Parse YAML text and return the engine's canonical JSON string. */
 export declare function loadJSON(yaml: string): Promise<string>;
