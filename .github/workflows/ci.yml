@@ -14,12 +14,16 @@ permissions:
   contents: read
 
 env:
-  # The engine source the wasm is built from. PINNED to a release tag:
-  # a bad engine main must not break builds (the pin law). BUMP WITH
-  # EACH ENGINE WAVE: every engine release train re-points this at the
-  # new tag; an unpinned ref: main silently picks up engine breakage
-  # mid-wave.
-  ENGINE_REF: refs/tags/v0.6.59
+  # The engine source the wasm is built from. PINNED (the pin law: a
+  # moving ref: main would silently pick up engine breakage mid-wave).
+  # Pinned to an engine main SHA here, not a release tag, on purpose:
+  # the validate face's stream attribution (#885 items 4+5 — a
+  # multi-document stream's diagnostic paths carry the document index,
+  # "/1/a" is a of document 1) is committed on engine main but not yet
+  # in a release tag; the v0.6.59 tag builds this package fine except
+  # for that piece. Re-point at the next release tag when the engine
+  # train cuts.
+  ENGINE_REF: 1f123a4921aad7e4d9a03a5d2e9a8a5f2d3d364c
 
 jobs:
   test:

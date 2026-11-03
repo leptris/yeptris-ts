@@ -275,6 +275,9 @@ test("module guard: the built dist carries every guarded export", async () => {
                     "_yeptris_wasm_events", "_yeptris_wasm_event_records",
                     "_yeptris_wasm_event_count", "_yeptris_wasm_event_arena",
                     "_yeptris_wasm_event_arena_len", "_yeptris_wasm_events_free",
+                    "_yeptris_wasm_validate", "_yeptris_wasm_json_schema_validate",
+                    "_yeptris_wasm_schema_compile", "_yeptris_wasm_schema_validate",
+                    "_yeptris_wasm_schema_free",
                     "_yeptris_wasm_out", "_yeptris_wasm_last_error", "_yeptris_wasm_free",
                     "_malloc"]) {
     assert.equal(typeof m[fn], "function", `${fn} must be exported`);
@@ -310,4 +313,372 @@ test("the wasm output buffer frees after every call", async () => {
   assert.equal(mod._yeptris_wasm_out(), 0, "output buffer not freed after dump");
   await assert.rejects(() => load("k: [unclosed\n")); // an ERROR call
   assert.equal(mod._yeptris_wasm_out(), 0);
+});
+
+// ---- the validate face (validate.h; the ruby/py parity ask) -------------
+//
+// Diagnostic values here are pinned from live engine probes — the same
+// discipline the py face's test_validate.py used (its 25 tests pin the
+// engine's real answers, not wished-for ones).
+
+test("validate: a clean document answers [] (the family default)", async () => {
+  const { validate, isValid } = await import("../src/index.js");
+  assert.deepEqual(await validate("a: 1\nb: [x, y]\n"), []);
+  assert.deepEqual(await validate("a: 1\n", {}), []); // empty options = the default walk
+  assert.equal(await isValid("a: 1\n"), true);
+  assert.equal(await isValid("a: 1\na: 2\n"), false);
+});
+
+test("validate: the duplicate-key diagnostic pins whole (code/keyword/path/line/col)", async () => {
+  const { validate } = await import("../src/index.js");
+  const [d] = await validate("a: 1\na: 2\n");
+  assert.deepEqual(d, {
+    code: 4, // YEPTRIS_DIAG_DUPLICATE_KEY
+    keyword: "duplicateKey",
+    path: [], // the mapping root carries the miss
+    pointer: "",
+    message: 'duplicate mapping key ("a")',
+    line: 2, // the SECOND key's position, 1-based
+    col: 1,
+    offset: 5,
+  });
+});
+
+test("validate: keys compare by canonical form (0o13 == 0xB)", async () => {
+  const { validate } = await import("../src/index.js");
+  const [d] = await validate("k: 0o13\nk: 0xB\n");
+  assert.equal(d.code, 4);
+  assert.equal(d.keyword, "duplicateKey");
+  assert.equal(d.line, 2);
+});
+
+test("validate: an explicit tag contradicting content rides path /k", async () => {
+  const { validate } = await import("../src/index.js");
+  const [d] = await validate("k: !!int notanint\n");
+  assert.equal(d.code, 1);
+  assert.equal(d.keyword, "tag");
+  assert.deepEqual(d.path, ["k"]);
+  assert.equal(d.pointer, "/k");
+  assert.equal(d.message, "explicit int tag on string content");
+  assert.equal(d.line, 1);
+  assert.equal(d.col, 10);
+});
+
+test("validate: schema json applies the spec 10.2 productions", async () => {
+  const { validate } = await import("../src/index.js");
+  // "y" is a core bool but matches no JSON production
+  const diags = await validate("k: y\n", { schema: "json" });
+  const k = diags.find((d) => d.pointer === "/k");
+  assert.ok(k, "the /k scalar is named");
+  assert.equal(k.code, 3);
+  assert.equal(k.keyword, "jsonType");
+  assert.equal(k.message, "plain scalar matches no JSON production");
+  // a non-string mapping key
+  const [key] = await validate("1: one\n", { schema: "json" });
+  assert.equal(key.code, 2);
+  assert.equal(key.keyword, "keyType");
+  // the same document is CLEAN under the core walk — the knob is real
+  assert.deepEqual(await validate("k: y\n", { schema: "core" }), []);
+});
+
+test("validate: json walk pins the engine's block-mapping answer (probe discipline)", async () => {
+  // PINNED from live probes, the same discipline the py face used: the
+  // json12 family walk answers one jsonType diagnostic per BLOCK-style
+  // mapping node (at the mapping's own path), while flow mappings and
+  // sequences/scalars are clean. The walk is the engine's; this suite
+  // pins the answer so a change is a decision, not a drift.
+  const { validate } = await import("../src/index.js");
+  assert.deepEqual(
+    (await validate("a: 1\n", { schema: "json" })).map((d) => [d.code, d.pointer, d.line, d.col]),
+    [[3, "", 1, 1]]);
+  assert.deepEqual(
+    (await validate("outer:\n  inner: 1\n", { schema: "json" })).map((d) => d.pointer),
+    ["", "/outer"]);
+  assert.deepEqual(await validate('{"a": 1}\n', { schema: "json" }), []); // flow: clean
+  assert.deepEqual(await validate("- 1\n- 2\n", { schema: "json" }), []); // sequence: clean
+});
+
+test("validate: a multi-document stream's paths name their document", async () => {
+  // the stream-attribution law (#885 items 4+5): "/1/a" is a of
+  // document 1 (0-based); single-document streams keep bare pointers
+  const { validate } = await import("../src/index.js");
+  const diags = await validate("--- a: 1\n--- a: y\n", { schema: "json" });
+  assert.deepEqual(diags.map((d) => d.pointer), ["/0", "/1", "/1/a"]);
+  assert.deepEqual(diags[2].path, ["1", "a"]);
+  assert.equal(diags[2].line, 2); // input-absolute marks
+  // and a single-document stream stays unprefixed
+  const solo = await validate("a: y\n", { schema: "json" });
+  assert.ok(solo.some((d) => d.pointer === "/a"));
+  assert.ok(solo.every((d) => !/^\/\d/.test(d.pointer)),
+            "no document-index prefix on a single-document stream");
+});
+
+test("validate: jsonSchema (2020-12) — required + minimum ride their paths", async () => {
+  const { validate } = await import("../src/index.js");
+  const schema = {
+    type: "object",
+    required: ["name"],
+    properties: { name: { type: "string" }, age: { type: "integer", minimum: 10 } },
+  };
+  const diags = await validate("age: 3\n", { jsonSchema: schema });
+  assert.deepEqual(diags, [
+    {
+      code: 6,
+      keyword: "required",
+      path: ["name"],
+      pointer: "/name",
+      message: 'missing required property "name"',
+      line: 1,
+      col: 1,
+      offset: 0,
+    },
+    {
+      code: 10,
+      keyword: "minimum",
+      path: ["age"],
+      pointer: "/age",
+      message: "3 is less than the minimum 10",
+      line: 1,
+      col: 6,
+      offset: 5,
+    },
+  ]);
+  // valid instance answers []
+  assert.deepEqual(await validate('name: "x"\nage: 12\n', { jsonSchema: schema }), []);
+});
+
+test("validate: jsonSchema takes a string document too", async () => {
+  const { validate } = await import("../src/index.js");
+  const diags = await validate("k: notanint\n", {
+    jsonSchema: '{"type":"object","properties":{"k":{"type":"integer"}}}',
+  });
+  assert.equal(diags[0].keyword, "type");
+  assert.equal(diags[0].pointer, "/k");
+  assert.equal(diags[0].message, "expected integer, got string");
+});
+
+test("validate: jsonSchema — nested paths, local $ref, unresolvable $ref", async () => {
+  const { validate } = await import("../src/index.js");
+  const nested = await validate('list: ["ok", 42]\n', {
+    jsonSchema: { type: "object", properties: { list: { type: "array", items: { type: "string" } } } },
+  });
+  assert.equal(nested[0].pointer, "/list/1");
+  assert.equal(nested[0].keyword, "type");
+  assert.equal(nested[0].message, "expected string, got integer");
+
+  const ref = await validate("n: -5\n", {
+    jsonSchema: {
+      $defs: { pos: { type: "integer", minimum: 1 } },
+      properties: { n: { $ref: "#/$defs/pos" } },
+    },
+  });
+  assert.equal(ref[0].keyword, "minimum");
+  assert.equal(ref[0].pointer, "/n");
+
+  const bad = await validate("n: 1\n", {
+    jsonSchema: { properties: { n: { $ref: "#/nowhere" } } },
+  });
+  assert.equal(bad[0].code, 23); // YEPTRIS_DIAG_REF — a diagnostic, not an exception
+  assert.equal(bad[0].keyword, "$ref");
+  assert.match(bad[0].message, /does not resolve/);
+});
+
+test("validate: an unparseable stream throws YamlError, not ValidationError", async () => {
+  const { validate, ValidationError } = await import("../src/index.js");
+  await assert.rejects(() => validate("a: [1,\n"), (e) => {
+    assert.equal(e.name, "YamlError");
+    assert.ok(!(e instanceof ValidationError));
+    assert.equal(e.diagnostics, undefined); // no report: the PARSE failed
+    return true;
+  });
+});
+
+test("validate: the options door is strict (unknown/mistyped/combined)", async () => {
+  const { validate, compileSchema } = await import("../src/index.js");
+  await assert.rejects(() => validate("a: 1\n", { bogus: 1 }), TypeError);
+  await assert.rejects(() => validate("a: 1\n", { schema: "nope" }), TypeError);
+  await assert.rejects(() => validate("a: 1\n", { schema: {} }), TypeError);
+  await assert.rejects(() => validate("a: 1\n", { jsonSchema: 42 }), TypeError);
+  await assert.rejects(
+    () => validate("a: 1\n", { schema: "core", jsonSchema: { type: "object" } }),
+    TypeError); // the doors are alternatives — refuse, never silently pick
+  const s = await compileSchema({ type: "object" });
+  await assert.rejects(
+    () => validate("a: 1\n", { schema: s, jsonSchema: { type: "object" } }),
+    TypeError);
+  s.free();
+});
+
+// ---- the compiled schema economy ----------------------------------------
+
+test("compileSchema: one compile, many validates (the economy)", async () => {
+  const { compileSchema, validate } = await import("../src/index.js");
+  const doc = {
+    type: "object",
+    required: ["name"],
+    properties: { name: { type: "string" }, age: { type: "integer", minimum: 10 } },
+  };
+  const schema = await compileSchema(doc);
+  assert.equal(schema.validate("age: 3\n").length, 2);
+  // reuse: same handle, second stream
+  assert.deepEqual(await schema.validate('name: "x"\n'), []);
+  // the compiled door answers exactly like the one-shot jsonSchema door
+  // over the same schema document
+  assert.deepEqual(
+    await schema.validate("age: 3\n"),
+    await validate("age: 3\n", { jsonSchema: doc }));
+  assert.equal(schema.isValid("name: x\n"), true);
+  assert.equal(schema.isValid("age: 3\n"), false);
+});
+
+test("compileSchema: a YAML-shaped schema compiles (JSON is YAML flow)", async () => {
+  const { compileSchema } = await import("../src/index.js");
+  const s = await compileSchema("type: object\nrequired:\n- name\n");
+  const diags = s.validate("age: 1\n");
+  assert.equal(diags[0].keyword, "required");
+  s.free();
+});
+
+test("compileSchema: bad bytes raise, never return a dead handle", async () => {
+  const { compileSchema } = await import("../src/index.js");
+  await assert.rejects(() => compileSchema(""), TypeError); // "hold no document"
+  await assert.rejects(() => compileSchema(undefined), TypeError);
+  await assert.rejects(() => compileSchema("{{{ not yaml"), (e) => {
+    assert.equal(e.name, "YamlError"); // the engine's why rides last_error
+    return true;
+  });
+});
+
+test("Schema: direct construction is refused; free is idempotent; reuse after free throws", async () => {
+  const { compileSchema, Schema } = await import("../src/index.js");
+  assert.throws(() => new Schema(), TypeError);
+  const s = await compileSchema({ type: "object" });
+  assert.equal(s.freed, false);
+  s.free();
+  assert.equal(s.freed, true);
+  s.free(); // idempotent — a second free is a no-op, not a double-free
+  assert.throws(() => s.validate("k: v\n"), /freed/);
+  assert.throws(() => s.isValid("k: v\n"), /freed/);
+});
+
+test("validate: a compiled Schema rides the schema: door", async () => {
+  const { compileSchema, validate } = await import("../src/index.js");
+  const s = await compileSchema({ type: "object", properties: { k: { type: "integer" } } });
+  const diags = await validate("k: notanint\n", { schema: s });
+  assert.equal(diags[0].keyword, "type");
+  assert.deepEqual(await validate("k: 3\n", { schema: s }), []);
+  s.free();
+});
+
+// ---- load/loadAll gates (validate BEFORE loading; collect) ---------------
+
+test("load with a gate: diagnostics raise ValidationError carrying the whole report", async () => {
+  const { load, ValidationError } = await import("../src/index.js");
+  await assert.rejects(
+    () => load("a: 1\na: 2\n", { schema: "core" }),
+    (e) => {
+      assert.ok(e instanceof ValidationError);
+      assert.notEqual(e.name, "YamlError"); // the input PARSED — not a parse error
+      assert.equal(e.diagnostics.length, 1);
+      assert.equal(e.diagnostics[0].keyword, "duplicateKey");
+      assert.match(e.message, /validation failed \(1 diagnostics\): duplicateKey/);
+      return true;
+    });
+  // a clean document loads as usual — the gate is invisible when green
+  assert.deepEqual(await load("a: 1\n", { schema: "core" }), { a: 1 });
+});
+
+test("load with collect: the document AND the whole report answer together", async () => {
+  const { load } = await import("../src/index.js");
+  const dirty = await load("a: 1\na: 2\n", { schema: "core", collect: true });
+  assert.deepEqual(dirty.document, { a: 2 }); // the load still happened
+  assert.equal(dirty.diagnostics.length, 1);
+  const clean = await load("a: 1\n", { schema: "core", collect: true });
+  assert.deepEqual(clean, { document: { a: 1 }, diagnostics: [] });
+  // collect requires an armed gate — with nothing to collect it lies
+  await assert.rejects(() => load("a: 1\n", { collect: true }), TypeError);
+});
+
+test("loadAll with a gate: the WHOLE stream validates before the parse", async () => {
+  const { loadAll, ValidationError } = await import("../src/index.js");
+  await assert.rejects(
+    () => loadAll("--- a: 1\n--- a: y\n", { schema: "json" }),
+    (e) => {
+      assert.ok(e instanceof ValidationError);
+      assert.equal(e.diagnostics[2].pointer, "/1/a"); // document 1's miss
+      return true;
+    });
+  // clean streams load as usual — sequences are json-clean (a block
+  // MAPPING root carries one jsonType diagnostic under the json walk,
+  // the engine's pinned answer, so the clean mapping case rides core)
+  assert.deepEqual(await loadAll("--- - 1\n--- - 2\n", { schema: "json" }),
+                   [[1], [2]]);
+  assert.deepEqual(await loadAll("--- a: 1\n--- b: 2\n", { schema: "core" }),
+                   [{ a: 1 }, { b: 2 }]);
+  // collect rides load() only — loadAll answers documents, not pairs
+  await assert.rejects(
+    () => loadAll("a: 1\n", { schema: "core", collect: true }), TypeError);
+});
+
+// ---- the Sync postures (init-then-work is synchronous) -------------------
+
+test("sync before init is refused with the way out", async () => {
+  // a FRESH module instance (the ?query specifier) — the file's other
+  // tests have already initialized the shared one
+  const fresh = await import("../src/index.js?uninitialized");
+  assert.throws(() => fresh.loadSync("k: v\n"), /await init\(\) first/);
+  assert.throws(() => fresh.validateSync("k: v\n"), /await init\(\) first/);
+  assert.throws(() => fresh.dumpSync({}), /await init\(\) first/);
+  assert.throws(() => fresh.versionSync(), /await init\(\) first/);
+});
+
+test("sync after init: every form answers like its async twin", async () => {
+  const I = await import("../src/index.js");
+  await I.init(); // idempotent; the async forms already ran, but be explicit
+
+  assert.deepEqual(I.loadSync("k: v\n"), { k: "v" });
+  assert.deepEqual(I.loadAllSync("a: 1\n---\nb: 2\n"), [{ a: 1 }, { b: 2 }]);
+  assert.equal(I.loadJSONSync("a: 1\n"), await I.loadJSON("a: 1\n"));
+  assert.equal(I.dumpSync({ k: "v" }), await I.dump({ k: "v" }));
+  assert.deepEqual(
+    I.validateSync("a: 1\na: 2\n"),
+    await I.validate("a: 1\na: 2\n"));
+  assert.deepEqual(
+    I.validateSync("k: y\n", { schema: "json" }),
+    await I.validate("k: y\n", { schema: "json" }));
+  assert.equal(I.isValidSync("a: 1\n"), true);
+  assert.equal(I.isValidSync("a: 1\na: 2\n"), false);
+  assert.equal(I.versionSync(), await I.version());
+  assert.equal(I.eventsSync("k: v\n").length, (await I.events("k: v\n")).length);
+  // the load gate + collect work synchronously too
+  assert.throws(() => I.loadSync("a: 1\na: 2\n", { schema: "core" }), I.ValidationError);
+  assert.deepEqual(
+    I.loadSync("a: 1\na: 2\n", { schema: "core", collect: true }).diagnostics.length, 1);
+});
+
+test("sync compiled schema: compileSchemaSync reuses and frees like its twin", async () => {
+  const I = await import("../src/index.js");
+  await I.init();
+  const s = I.compileSchemaSync({ type: "object", properties: { k: { type: "integer" } } });
+  assert.deepEqual(s.validate("k: notanint\n").map((d) => d.keyword), ["type"]);
+  assert.deepEqual(s.validate("k: 3\n"), []);
+  s.free();
+  assert.throws(() => s.validate("k: 3\n"), /freed/);
+});
+
+// ---- leak discipline across the new doors --------------------------------
+
+test("the wasm output buffer frees after every validate call", async () => {
+  const { wasmModule, compileSchema, validate } = await import("../src/index.js");
+  const mod = await wasmModule();
+  await validate("a: 1\na: 2\n"); // a diagnostic report
+  assert.equal(mod._yeptris_wasm_out(), 0, "report not freed after validate");
+  await validate("a: 1\n"); // an empty (valid) report
+  assert.equal(mod._yeptris_wasm_out(), 0, "report not freed after a clean validate");
+  await assert.rejects(() => validate("a: [1,\n")); // a parse failure
+  assert.equal(mod._yeptris_wasm_out(), 0);
+  const s = await compileSchema({ type: "object" });
+  await s.validate("a: 1\na: 2\n");
+  assert.equal(mod._yeptris_wasm_out(), 0, "report not freed after a schema validate");
+  s.free();
 });
