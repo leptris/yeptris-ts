@@ -485,6 +485,127 @@ void yeptris_wasm_events_free(void) {
     g_ev_arena_len = 0;
 }
 
+/* ---- the tolerant per-document stream iterator (parse.h) ----------------
+ *
+ * loadAll is all-or-nothing: one bad document fails the whole stream.
+ * The stream iterator walks document by document: a parse-class failure
+ * surfaces as ONE failed item (the failed document's own line/col via
+ * the iterator's status accessor) and the walk RESUMES at the next
+ * line-start marker — the valid documents after a bad one are kept.
+ * The MEMORY/ENCODING classes are stream-fatal; the iterator is done.
+ *
+ * The wasm boundary needs a RETAINED walk (one next() per JS call),
+ * which means the shim retains two things across calls: the iterator
+ * handle and a COPY of the input — the engine iterator only borrows
+ * its buffer until free, and the host's feed pointer dies when the
+ * JS call that opened the walk returns. Lifecycle mirrors the events
+ * face: open (feed, copy, construct), next() repeatedly, close always
+ * (the JS generator's finally is the owner).
+ *
+ * The base four functions only (new/next/status/free) — this face
+ * ships against the v0.6.60 engine, whose iterator predates the slice
+ * accessors; the frame document crosses as JSON through the same
+ * g_out discipline every answer uses (a frame is a dcount==1 forest,
+ * so serialize_json answers it directly — the load path). */
+static yeptris_stream_iter *g_it;
+static char *g_it_buf; /* the borrowed input's retained copy */
+static size_t g_it_buf_len;
+static int g_it_frame;  /* 1: g_out carries a document JSON; 0: none */
+static int g_it_index;  /* the last next() step's consumed stream index */
+
+EMSCRIPTEN_KEEPALIVE
+int yeptris_wasm_each_open(const char *data, size_t len) {
+    if (g_it != NULL) { /* defensive: the previous walk was not closed */
+        yeptris_stream_iter_free(g_it);
+        g_it = NULL;
+    }
+    free(g_it_buf);
+    g_it_buf = NULL;
+    g_it_buf_len = 0;
+    g_it_frame = 0;
+    g_it_index = 0;
+    g_it_buf = (char *)malloc(len > 0 ? len : 1);
+    if (g_it_buf == NULL) {
+        capture_plain("stream iterator allocation failed");
+        return YEPTRIS_ERROR_MEMORY;
+    }
+    if (len > 0) {
+        memcpy(g_it_buf, data, len);
+    }
+    g_it_buf_len = len;
+    g_it = yeptris_stream_iter_new(g_it_buf, len, NULL);
+    if (g_it == NULL) {
+        free(g_it_buf);
+        g_it_buf = NULL;
+        g_it_buf_len = 0;
+        capture_plain("stream iterator allocation failed");
+        return YEPTRIS_ERROR_MEMORY;
+    }
+    return YEPTRIS_OK;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int yeptris_wasm_each_next(void) {
+    if (g_it == NULL) {
+        capture_plain("the walk is closed");
+        return YEPTRIS_ERROR_ARG;
+    }
+    YeptrisDocument doc = NULL;
+    size_t index = 0;
+    YeptrisStatus st = yeptris_stream_iter_next(g_it, &doc, &index);
+    g_it_index = (int)index;
+    if (st == YEPTRIS_OK && doc == NULL) { /* the stream is over */
+        g_it_frame = 0;
+        return YEPTRIS_OK;
+    }
+    if (st == YEPTRIS_OK) {
+        size_t out_len = 0;
+        char *out = yeptris_serialize_json(doc, &out_len);
+        yeptris_document_free(doc);
+        if (out == NULL) {
+            capture_plain("serialization failed");
+            return YEPTRIS_ERROR_MEMORY;
+        }
+        publish_out(out, out_len);
+        g_it_frame = 1;
+        return YEPTRIS_OK;
+    }
+    /* A failed document (parse/depth class; the walk may continue) or
+     * a stream-fatal verdict (MEMORY/ENCODING; it may not). The why
+     * rides the engine's error channel; the position rides the
+     * iterator's per-document status accessor — the authoritative
+     * source for the failed document's own mark. */
+    g_it_frame = 0;
+    capture_error();
+    uint32_t line = 0;
+    uint32_t col = 0;
+    yeptris_stream_iter_status(g_it, &line, &col);
+    last_error_line = (int)line;
+    last_error_column = (int)col;
+    return (int)st;
+}
+
+/* 1 when the last successful next() published a document JSON into
+ * g_out; 0 when the stream is over (the JS door's end sentinel). */
+EMSCRIPTEN_KEEPALIVE
+int yeptris_wasm_each_frame(void) { return g_it_frame; }
+
+/* The 0-based stream index the last next() consumed — failures
+ * consume an index too, so the yield order is the stream's. */
+EMSCRIPTEN_KEEPALIVE
+int yeptris_wasm_each_index(void) { return g_it_index; }
+
+EMSCRIPTEN_KEEPALIVE
+void yeptris_wasm_each_close(void) {
+    yeptris_stream_iter_free(g_it);
+    g_it = NULL;
+    free(g_it_buf);
+    g_it_buf = NULL;
+    g_it_buf_len = 0;
+    g_it_frame = 0;
+    g_it_index = 0;
+}
+
 /* ---- validation (validate.h) -------------------------------------------
  *
  * The engine ships three validation doors — the SCHEMA-FAMILY walk

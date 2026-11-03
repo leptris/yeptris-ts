@@ -179,6 +179,29 @@ export declare function events(
   options?: Record<string, unknown>,
 ): Promise<YamlEvent[]>;
 
+/** One step of the tolerant stream walk (eachDocument): a valid
+ * document or a failed one, in stream order. The two shapes are
+ * exclusive — `document` is present (and `error` undefined) exactly
+ * when the frame parsed. */
+export type EachDocumentResult =
+  | { document: unknown; index: number; error: undefined }
+  | { document: undefined; index: number; error: YamlError };
+
+/** Walk a multi-document stream one document at a time, TOLERANTLY
+ * (the engine's stream iterator): an async generator of
+ * EachDocumentResult in stream order. A parse-class failure carries
+ * the failed document's OWN line/column and its 0-based stream index,
+ * and the walk CONTINUES at the next `---` line-start marker — the
+ * valid documents after a bad one are kept (loadAll would fail the
+ * whole stream instead). The stream-fatal classes (memory/encoding)
+ * yield their item and end the walk; an unrecoverable tail ends it.
+ * Lazy: nothing parses until iteration starts. Documents materialize
+ * through load's serialize door (the engine's default, schema 1.2
+ * core). */
+export declare function eachDocument(
+  yaml: string,
+): AsyncGenerator<EachDocumentResult, void, undefined>;
+
 /** Options for dump (js-yaml parity names over emit.h's
  * yeptris_emit_options). `indent` and `flowLevel` have no engine
  * option — the block indent is fixed at 2 and there is no flow-level
@@ -262,6 +285,13 @@ export declare function isValidSync(
 
 /** compileSchema's Sync twin. Throws unless the module is initialized. */
 export declare function compileSchemaSync(jsonSchema: object | string): Schema;
+
+/** eachDocument's Sync twin: a sync generator over an initialized
+ * module (await init() first). Throws unless the module is
+ * initialized. */
+export declare function eachDocumentSync(
+  yaml: string,
+): Generator<EachDocumentResult, void, undefined>;
 
 /** version's Sync twin. Throws unless the module is initialized. */
 export declare function versionSync(): string;
