@@ -23,7 +23,7 @@ env:
   # in a release tag; the v0.6.59 tag builds this package fine except
   # for that piece. Re-point at the next release tag when the engine
   # train cuts.
-  ENGINE_REF: 1f123a4921aad7e4d9a03a5d2e9a8a5f2d3d364c
+  ENGINE_REF: da1171eddf0730adc7cb5d8f9451b7c80bb80056
 
 jobs:
   test:
