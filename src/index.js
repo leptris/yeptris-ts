@@ -96,6 +96,11 @@ async function mod() {
     "_yeptris_wasm_event_arena",
     "_yeptris_wasm_event_arena_len",
     "_yeptris_wasm_events_free",
+    "_yeptris_wasm_each_open",
+    "_yeptris_wasm_each_next",
+    "_yeptris_wasm_each_frame",
+    "_yeptris_wasm_each_index",
+    "_yeptris_wasm_each_close",
     "_yeptris_wasm_validate",
     "_yeptris_wasm_json_schema_validate",
     "_yeptris_wasm_schema_compile",
@@ -497,6 +502,102 @@ function compileSchemaCore(mod, jsonSchema) {
     throw failFrom(mod); // the engine's why rides last_error
   }
   return Schema._take(mod, handle);
+}
+
+// ---- the tolerant stream walk (parse.h's stream iterator) ---------------
+//
+// loadAll is all-or-nothing: one bad document fails the whole stream.
+// The engine's stream iterator (leptris/yeptris#921) walks document by
+// document: a parse-class failure is ONE failed item carrying the
+// failed document's OWN line/column, and the walk RESUMES at the next
+// line-start marker — the valid documents after a bad one are kept.
+// The stream-fatal classes (memory/encoding) end the walk after their
+// item; an unrecoverable tail ends it.
+//
+// Across the wasm boundary the walk is RETAINED state (like the
+// recorder above): open copies the feed into the heap (the engine
+// iterator only borrows its buffer until free), every next() advances
+// one step, close frees both. The step answer crosses through the
+// g_out discipline: frame() says whether the last successful step
+// published a document JSON, index() says which stream position it
+// consumed (failures consume an index too — the yield order is the
+// stream's). Each document serializes through the same serialize_json
+// door load uses, so a frame's value is load's value by construction.
+//
+// The JS shape is the rs face's: an iterator of result objects —
+// `{ document, index }` for a valid document, `{ error, index }` for
+// a failed one. The engine default (schema 1.2 core) rides as-is; the
+// options door (schema/max_depth) is the engine's parse-options struct
+// and joins when the face needs it.
+
+const ST_MEMORY = 2; // YEPTRIS_ERROR_MEMORY — stream-fatal
+const ST_ENCODING = 4; // YEPTRIS_ERROR_ENCODING — stream-fatal
+
+function eachDocumentCore(mod, yaml) {
+  return (function* () {
+    const [ptr, len] = cstr(mod, yaml);
+    try {
+      const openSt = mod._yeptris_wasm_each_open(ptr, len);
+      if (openSt !== 0) {
+        throw failFrom(mod);
+      }
+      for (;;) {
+        const st = mod._yeptris_wasm_each_next();
+        const index = mod._yeptris_wasm_each_index();
+        if (st === 0) {
+          if (mod._yeptris_wasm_each_frame() === 0) {
+            return; // the stream is over
+          }
+          const document = JSON.parse(
+            mod.UTF8ToString(mod._yeptris_wasm_out(), mod._yeptris_wasm_out_len()));
+          mod._yeptris_wasm_out_free();
+          yield { document, index, error: undefined };
+        } else {
+          yield {
+            document: undefined,
+            index,
+            error: new YamlError(
+              mod.UTF8ToString(mod._yeptris_wasm_last_error()),
+              mod._yeptris_wasm_last_error_line(),
+              mod._yeptris_wasm_last_error_column()),
+          };
+          if (st === ST_MEMORY || st === ST_ENCODING) {
+            return; // stream-fatal: the iterator is done
+          }
+        }
+      }
+    } finally {
+      mod._yeptris_wasm_out_free(); // idempotent (frees NULL = no-op)
+      mod._yeptris_wasm_each_close();
+    }
+  })();
+}
+
+/** Walk a multi-document stream one document at a time, TOLERANTLY
+ * (the engine's stream iterator): yields one result per document in
+ * stream order —
+ *
+ *   { document: value, index: 0, error: undefined } // a valid document
+ *   { document: undefined, index: 1, error: YamlError } // a failed one
+ *
+ * A parse-class failure carries the failed document's OWN line/column
+ * and its 0-based stream index, and the walk CONTINUES at the next
+ * `---` line-start marker — the valid documents after a bad one are
+ * kept (parse()/loadAll would fail the whole stream instead). The
+ * stream-fatal classes (memory/encoding) yield their item and end the
+ * walk; an unrecoverable tail ends it. Lazy: nothing parses until
+ * iteration starts. Documents materialize through load's serialize
+ * door, so each frame's value is load's value by construction. The
+ * engine default (schema 1.2 core) rides as-is. */
+export async function* eachDocument(yaml) {
+  const m = await mod();
+  yield* eachDocumentCore(m, yaml);
+}
+
+/** eachDocument's Sync twin: a sync generator over an initialized
+ * module (await init() first). */
+export function eachDocumentSync(yaml) {
+  return eachDocumentCore(requireMod("eachDocumentSync"), yaml);
 }
 
 // ---- load/dump cores (shared by the async and Sync forms) --------------

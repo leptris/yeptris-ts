@@ -689,3 +689,108 @@ test("the wasm output buffer frees after every validate call", async () => {
   assert.equal(mod._yeptris_wasm_out(), 0, "report not freed after a schema validate");
   s.free();
 });
+
+// ---- the tolerant stream walk (eachDocument) ----
+
+test("eachDocument: every valid document of a stream yields in order", async () => {
+  const { eachDocument } = await import("../src/index.js");
+  const items = [];
+  for await (const it of eachDocument("--- 41\n--- \"42\"\n---\n")) items.push(it);
+  assert.equal(items.length, 3);
+  assert.deepEqual(items.map((i) => i.document), [41, "42", null]);
+  assert.deepEqual(items.map((i) => i.index), [0, 1, 2]);
+  assert.ok(items.every((i) => i.error === undefined));
+});
+
+test("eachDocument: keeps valid documents around a bad one", async () => {
+  const { eachDocument } = await import("../src/index.js");
+  const items = [];
+  for await (const it of eachDocument("--- ok_one\n--- {{{{ bad\n--- ok_two\n")) {
+    items.push(it);
+  }
+  assert.equal(items.length, 3);
+  assert.equal(items[0].document, "ok_one");
+  assert.equal(items[1].document, undefined);
+  assert.ok(items[1].error instanceof Error);
+  assert.equal(items[1].index, 1);
+  assert.equal(items[1].error.line, 2); // the failed document's OWN geometry
+  assert.ok(items[1].error.column > 0);
+  assert.equal(items[2].document, "ok_two"); // the walk resumed past the bad frame
+  assert.equal(items[2].index, 2);
+});
+
+test("eachDocument: the quoted-marker frame pins one failure + the raw tail", async () => {
+  const { eachDocument } = await import("../src/index.js");
+  const items = [];
+  for await (const it of eachDocument("\"line one\n---\nline two\"\n")) items.push(it);
+  // the grammar rejects the quoted scalar as ONE unit; the raw-marker
+  // resync lands on the --- INSIDE the quoted text (the failed frame
+  // has no scanner-defined extent), so the tail parses best-effort
+  assert.equal(items.length, 2);
+  assert.equal(items[0].document, undefined);
+  assert.ok(items[0].error instanceof Error);
+  assert.equal(items[1].document, "line two\"");
+  assert.equal(items[1].index, 1);
+});
+
+test("eachDocument: a deep unrecoverable tail ends the walk", async () => {
+  const { eachDocument } = await import("../src/index.js");
+  // no second --- marker: the tail CONTINUES document 0, so the whole
+  // input is one document that fails deep — one error item, index 0
+  // (the rs face's pin)
+  const deep = "--- [1]\n" + "[".repeat(1200) + "]".repeat(1200) + "\n";
+  const items = [];
+  for await (const it of eachDocument(deep)) items.push(it);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].document, undefined);
+  assert.ok(items[0].error instanceof Error);
+  assert.equal(items[0].index, 0);
+});
+
+test("eachDocument: empty and comment streams yield nothing", async () => {
+  const { eachDocument } = await import("../src/index.js");
+  const a = [];
+  for await (const it of eachDocument("")) a.push(it);
+  const b = [];
+  for await (const it of eachDocument("# just a comment\n")) b.push(it);
+  assert.deepEqual([a.length, b.length], [0, 0]);
+});
+
+test("eachDocument: a depth failure surfaces as the failed frame's item", async () => {
+  const { eachDocument } = await import("../src/index.js");
+  const deep = "--- " + "[".repeat(1200) + "]".repeat(1200) + "\n";
+  const items = [];
+  for await (const it of eachDocument(deep)) items.push(it);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].document, undefined);
+  assert.equal(items[0].index, 0);
+  assert.ok(items[0].error.line >= 1);
+});
+
+test("eachDocument: frames equal loadAll's documents on a valid stream", async () => {
+  const { eachDocument, loadAll } = await import("../src/index.js");
+  const src = "name: yeptris\nflow: [1, 2]\n---\n- a\n- b\n---\n~\n";
+  const walked = [];
+  for await (const it of eachDocument(src)) walked.push(it.document);
+  assert.deepEqual(walked, await loadAll(src));
+});
+
+test("eachDocumentSync: the walk runs synchronously after init", async () => {
+  const I = await import("../src/index.js");
+  await I.init();
+  const items = [...I.eachDocumentSync("--- 1\n--- {{{{ bad\n--- 3\n")];
+  assert.equal(items.length, 3);
+  assert.equal(items[0].document, 1);
+  assert.equal(items[1].error instanceof Error, true);
+  assert.equal(items[2].document, 3);
+});
+
+test("eachDocument: closed walks free their state (no retained wasm buffer)", async () => {
+  const { wasmModule, eachDocument } = await import("../src/index.js");
+  const mod = await wasmModule();
+  for await (const _ of eachDocument("--- 1\n--- 2\n")) void _;
+  // the walk is over: the shim closed its iterator — a raw next() is
+  // refused with the ARG status, not a crash
+  assert.notEqual(mod._yeptris_wasm_each_next(), 0);
+  void eachDocument;
+});
