@@ -366,51 +366,58 @@ test("validate: an explicit tag contradicting content rides path /k", async () =
 
 test("validate: schema json applies the spec 10.2 productions", async () => {
   const { validate } = await import("../src/index.js");
-  // "y" is a core bool but matches no JSON production
-  const diags = await validate("k: y\n", { schema: "json" });
-  const k = diags.find((d) => d.pointer === "/k");
-  assert.ok(k, "the /k scalar is named");
-  assert.equal(k.code, 3);
-  assert.equal(k.keyword, "jsonType");
-  assert.equal(k.message, "plain scalar matches no JSON production");
-  // a non-string mapping key
+  // the example-10.8 law (engine #908): implicit no-production plains
+  // are STRINGS in the 12_JSON family — `k: y` validates clean; the
+  // jsonType diagnostic fires on EXPLICIT non-JSON tags
+  assert.deepEqual(await validate("k: y\n", { schema: "json" }), []);
+  const diags = await validate("a: !foo 1\n", { schema: "json" });
+  const a = diags.find((d) => d.pointer === "/a");
+  assert.ok(a, "the /a scalar is named");
+  assert.equal(a.code, 3);
+  assert.equal(a.keyword, "jsonType");
+  // a non-string mapping key: the key resolves as an int (a JSON
+  // production), so only the keyType miss rides — no jsonType rider
   const [key] = await validate("1: one\n", { schema: "json" });
   assert.equal(key.code, 2);
   assert.equal(key.keyword, "keyType");
   // the same document is CLEAN under the core walk — the knob is real
-  assert.deepEqual(await validate("k: y\n", { schema: "core" }), []);
+  assert.deepEqual(await validate("a: !foo 1\n", { schema: "core" }), []);
 });
 
-test("validate: json walk pins the engine's block-mapping answer (probe discipline)", async () => {
-  // PINNED from live probes, the same discipline the py face used: the
-  // json12 family walk answers one jsonType diagnostic per BLOCK-style
-  // mapping node (at the mapping's own path), while flow mappings and
-  // sequences/scalars are clean. The walk is the engine's; this suite
-  // pins the answer so a change is a decision, not a drift.
+test("validate: json walk answers on non-JSON types, not block style (probe discipline)", async () => {
+  // PINNED from live probes on the 0.6.60 engine (the example-10.8
+  // law, engine #908): the json12 family walk diagnoses non-JSON
+  // TYPES — an explicit non-JSON tag, a non-string key — while block
+  // STYLE itself is clean: block mappings/sequences whose content is
+  // JSON-typed pass, flow and block answer identically.
   const { validate } = await import("../src/index.js");
-  assert.deepEqual(
-    (await validate("a: 1\n", { schema: "json" })).map((d) => [d.code, d.pointer, d.line, d.col]),
-    [[3, "", 1, 1]]);
-  assert.deepEqual(
-    (await validate("outer:\n  inner: 1\n", { schema: "json" })).map((d) => d.pointer),
-    ["", "/outer"]);
+  assert.deepEqual(await validate("a: 1\n", { schema: "json" }), []);
+  assert.deepEqual(await validate("outer:\n  inner: 1\n", { schema: "json" }), []);
+  assert.deepEqual(await validate("- 1\n- 2\n", { schema: "json" }), []); // block seq: clean
   assert.deepEqual(await validate('{"a": 1}\n', { schema: "json" }), []); // flow: clean
-  assert.deepEqual(await validate("- 1\n- 2\n", { schema: "json" }), []); // sequence: clean
+  assert.deepEqual(
+    (await validate("a: !foo 1\n", { schema: "json" })).map((d) => [d.code, d.pointer, d.line, d.col]),
+    [[3, "/a", 1, 9]]);
 });
 
 test("validate: a multi-document stream's paths name their document", async () => {
-  // the stream-attribution law (#885 items 4+5): "/1/a" is a of
-  // document 1 (0-based); single-document streams keep bare pointers
+  // the stream-attribution law (#885 items 4+5): "/0/a" is of
+  // document 0 (0-based); single-document streams keep bare pointers.
+  // the marker-line law (#915): a glued marker value ("--- a: 1",
+  // "--- - 1") is a parse error at the mark — fixtures ride the
+  // vertical-marker shape.
   const { validate } = await import("../src/index.js");
-  const diags = await validate("--- a: 1\n--- a: y\n", { schema: "json" });
-  assert.deepEqual(diags.map((d) => d.pointer), ["/0", "/1", "/1/a"]);
-  assert.deepEqual(diags[2].path, ["1", "a"]);
-  assert.equal(diags[2].line, 2); // input-absolute marks
+  const diags = await validate("---\na: !foo 1\n---\nb: 2\n", { schema: "json" });
+  assert.deepEqual(diags.map((d) => d.pointer), ["/0/a"]);
+  assert.deepEqual(diags[0].path, ["0", "a"]);
+  assert.equal(diags[0].line, 2); // input-absolute marks
   // and a single-document stream stays unprefixed
-  const solo = await validate("a: y\n", { schema: "json" });
-  assert.ok(solo.some((d) => d.pointer === "/a"));
-  assert.ok(solo.every((d) => !/^\/\d/.test(d.pointer)),
-            "no document-index prefix on a single-document stream");
+  const solo = await validate("a: !foo 1\n", { schema: "json" });
+  assert.deepEqual(solo.map((d) => d.pointer), ["/a"]);
+  // the glued-marker shape itself is a PARSE error, not a diagnostic
+  await assert.rejects(
+    () => validate("--- a: 1\n--- a: y\n", { schema: "json" }),
+    (e) => e.name === "YamlError" && e.line === 1 && e.column === 6);
 });
 
 test("validate: jsonSchema (2020-12) — required + minimum ride their paths", async () => {
@@ -602,18 +609,18 @@ test("load with collect: the document AND the whole report answer together", asy
 test("loadAll with a gate: the WHOLE stream validates before the parse", async () => {
   const { loadAll, ValidationError } = await import("../src/index.js");
   await assert.rejects(
-    () => loadAll("--- a: 1\n--- a: y\n", { schema: "json" }),
+    () => loadAll("---\na: !foo 1\n---\nb: 2\n", { schema: "json" }),
     (e) => {
       assert.ok(e instanceof ValidationError);
-      assert.equal(e.diagnostics[2].pointer, "/1/a"); // document 1's miss
+      assert.equal(e.diagnostics[0].pointer, "/0/a"); // document 0's miss
       return true;
     });
-  // clean streams load as usual — sequences are json-clean (a block
-  // MAPPING root carries one jsonType diagnostic under the json walk,
-  // the engine's pinned answer, so the clean mapping case rides core)
-  assert.deepEqual(await loadAll("--- - 1\n--- - 2\n", { schema: "json" }),
+  // clean streams load as usual — block style is json-clean under the
+  // example-10.8 law, and fixtures ride the vertical-marker shape
+  // (the marker-line law: a glued marker value is a parse error)
+  assert.deepEqual(await loadAll("---\n- 1\n---\n- 2\n", { schema: "json" }),
                    [[1], [2]]);
-  assert.deepEqual(await loadAll("--- a: 1\n--- b: 2\n", { schema: "core" }),
+  assert.deepEqual(await loadAll("---\na: 1\n---\nb: 2\n", { schema: "core" }),
                    [{ a: 1 }, { b: 2 }]);
   // collect rides load() only — loadAll answers documents, not pairs
   await assert.rejects(
