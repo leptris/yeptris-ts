@@ -16,6 +16,7 @@
 #include "yeptris/events.h"
 #include "yeptris/json.h"
 #include "yeptris/parse.h"
+#include "yeptris/validate.h"
 #include "yeptris/version.h"
 
 static char *g_out;
@@ -483,3 +484,239 @@ void yeptris_wasm_events_free(void) {
     g_ev_count = 0;
     g_ev_arena_len = 0;
 }
+
+/* ---- validation (validate.h) -------------------------------------------
+ *
+ * The engine ships three validation doors — the SCHEMA-FAMILY walk
+ * (yeptris_validate, the YeptrisSchema kind rides as a plain int
+ * parameter), the one-shot JSON SCHEMA walk (yeptris_json_schema_
+ * validate) and the COMPILED economy (yeptris_schema_compile /
+ * yeptris_schema_validate / yeptris_schema_free: parse the schema
+ * once, validate many streams).
+ *
+ * Diagnostics cross as DATA, never as pointers: the whole report
+ * drains once into the same g_out arena the JSON answers use, spelled
+ * as one JSON array of raw records
+ *
+ *   {"code":N,"path":"...","message":"...","line":N,"col":N,"offset":N}
+ *
+ * `path` is the engine's JSON-pointer instance path ("/a/b/0", ~0/~1
+ * escaped; "" at the root), `message` its bounded detail. The
+ * code -> keyword mapping is binding-owned (the same law the ruby/py
+ * faces follow) and lives in src/index.js — the shim carries the raw
+ * record only. The report frees inside the shim on every path; the
+ * JS answer arrives via the g_out discipline (read + out_free), so
+ * nothing engine-owned survives the call.
+ *
+ * Statuses through the wasm boundary: YEPTRIS_OK (valid) and
+ * YEPTRIS_ERROR_SCHEMA (invalid: the report carries diagnostics) both
+ * publish the array; every other status is a call failure —
+ * last_error carries the why, g_out is untouched. The host reads
+ * g_out for statuses 0 and 9 only.
+ *
+ * The compiled handle crosses as an opaque i32 (a wasm32 pointer):
+ * the host stores it and hands it back; free rides
+ * yeptris_wasm_schema_free. A compile failure answers 0 with
+ * last_error set. The engine carries NO schema KIND on the compile
+ * door (a compiled handle is a JSON-Schema document by
+ * validate.h's contract) — the family kind selection lives on the
+ * validate door, exactly as the C surface spells it. */
+
+/* A growable append buffer for the report JSON. */
+typedef struct {
+    char *p;
+    size_t len, cap;
+    int failed;
+} yw_buf;
+
+static void yw_buf_grow(yw_buf *b, size_t need) {
+    if (b->failed || b->len + need <= b->cap) {
+        return;
+    }
+    size_t ncap = b->cap ? b->cap : 256;
+    while (ncap < b->len + need) {
+        ncap *= 2;
+    }
+    char *np = (char *)realloc(b->p, ncap);
+    if (np == NULL) {
+        free(b->p);
+        b->p = NULL;
+        b->failed = 1;
+        return;
+    }
+    b->p = np;
+    b->cap = ncap;
+}
+
+static void yw_buf_puts(yw_buf *b, const char *s) {
+    size_t n = strlen(s);
+    yw_buf_grow(b, n + 1);
+    if (b->failed) {
+        return;
+    }
+    memcpy(b->p + b->len, s, n);
+    b->len += n;
+}
+
+/* Appends s as one JSON string literal: quote, escape (the bounded
+ * detail text can carry quotes, backslashes and control characters —
+ * the instance's own scalars appear in it), close. */
+static void yw_buf_putjson(yw_buf *b, const char *s) {
+    yw_buf_grow(b, 1);
+    if (b->failed) {
+        return;
+    }
+    b->p[b->len++] = '"';
+    for (const unsigned char *c = (const unsigned char *)s; *c != '\0'; c++) {
+        char esc[8];
+        switch (*c) {
+        case '"':
+            yw_buf_puts(b, "\\\"");
+            break;
+        case '\\':
+            yw_buf_puts(b, "\\\\");
+            break;
+        case '\b':
+            yw_buf_puts(b, "\\b");
+            break;
+        case '\f':
+            yw_buf_puts(b, "\\f");
+            break;
+        case '\n':
+            yw_buf_puts(b, "\\n");
+            break;
+        case '\r':
+            yw_buf_puts(b, "\\r");
+            break;
+        case '\t':
+            yw_buf_puts(b, "\\t");
+            break;
+        default:
+            if (*c < 0x20) {
+                snprintf(esc, sizeof esc, "\\u%04x", (unsigned)*c);
+                yw_buf_puts(b, esc);
+            } else {
+                yw_buf_grow(b, 1);
+                if (b->failed) {
+                    return;
+                }
+                b->p[b->len++] = (char)*c;
+            }
+            break;
+        }
+        if (b->failed) {
+            return;
+        }
+    }
+    yw_buf_grow(b, 2);
+    if (b->failed) {
+        return;
+    }
+    b->p[b->len++] = '"';
+    b->p[b->len] = '\0';
+}
+
+static void yw_buf_putint(yw_buf *b, long v) {
+    char tmp[32];
+    snprintf(tmp, sizeof tmp, "%ld", v);
+    yw_buf_puts(b, tmp);
+}
+
+/* Drains the whole report into g_out as the JSON array and frees the
+ * report — exactly once, on every path. rep may be NULL (an empty
+ * answer: the parse-failed statuses never reach here, but an engine
+ * that hands back no report for a valid empty stream does). */
+static int yeptris_wasm_publish_report(yeptris_validate_report *rep) {
+    size_t n = rep != NULL ? yeptris_validate_report_count(rep) : 0;
+    yw_buf b;
+    memset(&b, 0, sizeof b);
+    yw_buf_puts(&b, "[");
+    for (size_t i = 0; i < n; i++) {
+        const yeptris_diagnostic *d = yeptris_validate_report_at(rep, i);
+        if (d == NULL) {
+            break;
+        }
+        if (i != 0) {
+            yw_buf_puts(&b, ",");
+        }
+        yw_buf_puts(&b, "{\"code\":");
+        yw_buf_putint(&b, (long)d->code);
+        yw_buf_puts(&b, ",\"path\":");
+        yw_buf_putjson(&b, d->path);
+        yw_buf_puts(&b, ",\"message\":");
+        yw_buf_putjson(&b, d->detail);
+        yw_buf_puts(&b, ",\"line\":");
+        yw_buf_putint(&b, (long)d->line);
+        yw_buf_puts(&b, ",\"col\":");
+        yw_buf_putint(&b, (long)d->col);
+        yw_buf_puts(&b, ",\"offset\":");
+        yw_buf_putint(&b, (long)d->offset);
+        yw_buf_puts(&b, "}");
+    }
+    yw_buf_puts(&b, "]");
+    yeptris_validate_report_free(rep);
+    if (b.failed) {
+        return YEPTRIS_ERROR_MEMORY;
+    }
+    /* Ownership moves to g_out: yeptris_wasm_out_free releases it via
+     * yeptris_free (plain free) — the same allocator this realloc/malloc
+     * pair rides, so the hand-off is symmetric. */
+    publish_out(b.p, b.len);
+    return YEPTRIS_OK;
+}
+
+/* The status a validate call answers with: OK and ERROR_SCHEMA both
+ * publish the report; the caller (JS) reads g_out for those two and
+ * treats the rest as a call failure. */
+static int yeptris_wasm_validate_status(YeptrisStatus st, yeptris_validate_report *rep) {
+    if (st != YEPTRIS_OK && st != YEPTRIS_ERROR_SCHEMA) {
+        capture_error();
+        return (int)st;
+    }
+    if (yeptris_wasm_publish_report(rep) != 0) {
+        capture_plain("diagnostic serialization failed");
+        return YEPTRIS_ERROR_MEMORY;
+    }
+    return (int)st;
+}
+
+/* The SCHEMA-FAMILY walk: schema_kind is YeptrisSchema (resolve.h) —
+ * the engine validates that the kind IS a validation family and
+ * answers YEPTRIS_ERROR_ARG otherwise. */
+EMSCRIPTEN_KEEPALIVE
+int yeptris_wasm_validate(const char *data, size_t len, int schema_kind) {
+    yeptris_validate_report *rep = NULL;
+    YeptrisStatus st = yeptris_validate(data, len, (YeptrisSchema)schema_kind, &rep);
+    return yeptris_wasm_validate_status(st, rep);
+}
+
+/* The one-shot JSON SCHEMA walk (draft 2020-12 subset; validate.h). */
+EMSCRIPTEN_KEEPALIVE
+int yeptris_wasm_json_schema_validate(const char *schema, size_t schema_len, const char *data,
+                                      size_t len) {
+    yeptris_validate_report *rep = NULL;
+    YeptrisStatus st = yeptris_json_schema_validate(schema, schema_len, data, len, &rep);
+    return yeptris_wasm_validate_status(st, rep);
+}
+
+/* The COMPILED economy. The handle is an opaque wasm32 pointer the
+ * host stores verbatim; 0 = compile failed (last_error carries the
+ * why). */
+EMSCRIPTEN_KEEPALIVE
+yeptris_schema *yeptris_wasm_schema_compile(const char *bytes, size_t n) {
+    yeptris_schema *s = yeptris_schema_compile(bytes, n);
+    if (s == NULL) {
+        capture_error();
+    }
+    return s;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int yeptris_wasm_schema_validate(yeptris_schema *s, const char *data, size_t len) {
+    yeptris_validate_report *rep = NULL;
+    YeptrisStatus st = yeptris_schema_validate(s, data, len, &rep);
+    return yeptris_wasm_validate_status(st, rep);
+}
+
+EMSCRIPTEN_KEEPALIVE
+void yeptris_wasm_schema_free(yeptris_schema *s) { yeptris_schema_free(s); }
