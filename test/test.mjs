@@ -775,6 +775,81 @@ test("eachDocument: frames equal loadAll's documents on a valid stream", async (
   assert.deepEqual(walked, await loadAll(src));
 });
 
+test("eachDocument: schema compat reads the 1.1 words the core family keeps as strings", async () => {
+  const { eachDocument } = await import("../src/index.js");
+  const items = [];
+  for await (const it of eachDocument("--- y\n--- y\n", { schema: "compat" })) items.push(it);
+  assert.equal(items.length, 2);
+  assert.equal(items[0].document, true); // libyaml/Psych implicit typing
+  assert.equal(items[1].document, true);
+  const core = [];
+  for await (const it of eachDocument("--- y\n")) core.push(it);
+  assert.equal(core[0].document, "y"); // the default stays 1.2 core
+});
+
+test("eachDocument: schema json resolves only the JSON productions", async () => {
+  const { eachDocument } = await import("../src/index.js");
+  // a no-production plain is a STRING under both families (spec 10.8),
+  // but the radix scalars split: 0x is a core int, a json string
+  const items = [];
+  for await (const it of eachDocument("--- 0x1F\n--- [1, 2]\n", { schema: "json" })) {
+    items.push(it);
+  }
+  assert.equal(items.length, 2);
+  assert.equal(items[0].document, "0x1F"); // no JSON production: a string
+  assert.deepEqual(items[1].document, [1, 2]);
+  const core = [];
+  for await (const it of eachDocument("--- 0x1F\n")) core.push(it);
+  assert.equal(core[0].document, 31); // the default core family resolves the int
+});
+
+test("eachDocument: maxDepth caps nesting per frame and the walk keeps the rest", async () => {
+  const { eachDocument } = await import("../src/index.js");
+  const deep = "[".repeat(50) + "]".repeat(50);
+  const items = [];
+  for await (const it of eachDocument("--- 1\n--- " + deep + "\n--- 3\n", { maxDepth: 8 })) {
+    items.push(it);
+  }
+  assert.equal(items.length, 3);
+  assert.equal(items[0].document, 1);
+  assert.equal(items[1].document, undefined); // depth-capped at the option
+  assert.ok(items[1].error instanceof Error);
+  assert.equal(items[2].document, 3); // the walk resumed
+  // the same stream rides whole at the default
+  const open = [];
+  for await (const it of eachDocument("--- " + deep + "\n")) open.push(it);
+  assert.ok(Array.isArray(open[0].document)); // no cap: 50 deep parses fine
+});
+
+test("eachDocument: the options door rejects unknown keys and bad values", async () => {
+  const { eachDocument } = await import("../src/index.js");
+  await assert.rejects(
+    () => eachDocument("--- 1\n", { depth: 3 }).next(),
+    /unknown/,
+  );
+  await assert.rejects(
+    () => eachDocument("--- 1\n", { schema: "psymal" }).next(),
+    /schema/,
+  );
+  await assert.rejects(
+    () => eachDocument("--- 1\n", { maxDepth: 1.5 }).next(),
+    /maxDepth/,
+  );
+  await assert.rejects(
+    () => eachDocument("--- 1\n", "core").next(),
+    /object/,
+  );
+});
+
+test("eachDocumentSync: the options door rides the sync twin", async () => {
+  const { init, eachDocumentSync } = await import("../src/index.js");
+  await init();
+  const items = [];
+  for (const it of eachDocumentSync("--- y\n", { schema: "compat" })) items.push(it);
+  assert.equal(items[0].document, true);
+  assert.throws(() => eachDocumentSync("--- 1\n", { schema: "x" }).next(), /schema/);
+});
+
 test("eachDocumentSync: the walk runs synchronously after init", async () => {
   const I = await import("../src/index.js");
   await I.init();

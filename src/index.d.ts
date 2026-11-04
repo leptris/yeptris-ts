@@ -187,6 +187,20 @@ export type EachDocumentResult =
   | { document: unknown; index: number; error: undefined }
   | { document: undefined; index: number; error: YamlError };
 
+/** Options for the eachDocument walk: the same schema/maxDepth door
+ * the ruby and python faces expose, over the engine's parse options.
+ * Defaults: schema "core" (the engine's default), maxDepth 0 (the
+ * library default). Unknown keys throw TypeError. */
+export interface EachDocumentOptions {
+  /** The implicit-typing family every frame parses under: "core" (the
+   *  YAML 1.2 core family), "compat" (libyaml/Psych 1.1 implicit
+   *  typing), "json" (spec 10.2 JSON productions), "full" (the full
+   *  1.2 family). */
+  schema?: "core" | "compat" | "json" | "full";
+  /** Maximum nesting depth per frame (0 = the library default). */
+  maxDepth?: number;
+}
+
 /** Walk a multi-document stream one document at a time, TOLERANTLY
  * (the engine's stream iterator): an async generator of
  * EachDocumentResult in stream order. A parse-class failure carries
@@ -196,10 +210,10 @@ export type EachDocumentResult =
  * whole stream instead). The stream-fatal classes (memory/encoding)
  * yield their item and end the walk; an unrecoverable tail ends it.
  * Lazy: nothing parses until iteration starts. Documents materialize
- * through load's serialize door (the engine's default, schema 1.2
- * core). */
+ * through load's serialize door, under the options' schema. */
 export declare function eachDocument(
   yaml: string,
+  options?: EachDocumentOptions,
 ): AsyncGenerator<EachDocumentResult, void, undefined>;
 
 /** Options for dump (js-yaml parity names over emit.h's
@@ -291,6 +305,7 @@ export declare function compileSchemaSync(jsonSchema: object | string): Schema;
  * initialized. */
 export declare function eachDocumentSync(
   yaml: string,
+  options?: EachDocumentOptions,
 ): Generator<EachDocumentResult, void, undefined>;
 
 /** version's Sync twin. Throws unless the module is initialized. */

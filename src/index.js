@@ -533,11 +533,59 @@ function compileSchemaCore(mod, jsonSchema) {
 const ST_MEMORY = 2; // YEPTRIS_ERROR_MEMORY — stream-fatal
 const ST_ENCODING = 4; // YEPTRIS_ERROR_ENCODING — stream-fatal
 
-function eachDocumentCore(mod, yaml) {
+// The eachDocument options door (#28): schema + maxDepth ride the
+// engine's parse options on every frame — the same door ruby's
+// each_document(schema:, max_depth:) and py's each_document(schema=,
+// max_depth=) expose. Defaults are the engine's: schema 1.2 core,
+// maxDepth 0 = the library default.
+const SCHEMA_KINDS = { core: 0, compat: 1, json: 2, full: 3 };
+
+function parseEachOptions(options, who) {
+  if (options === undefined || options === null) {
+    return { kind: 0, maxDepth: 0 };
+  }
+  if (typeof options !== "object" || Array.isArray(options)) {
+    throw new TypeError(
+      `yeptris: ${who} options must be an object ({ schema, maxDepth })` +
+        ` (got ${typeof options})`);
+  }
+  const KEYS = new Set(["schema", "maxDepth"]);
+  for (const k of Object.keys(options)) {
+    if (!KEYS.has(k)) {
+      throw new TypeError(
+        `yeptris: ${who} option ${JSON.stringify(k)} is unknown ` +
+          `(the surface is schema + maxDepth)`);
+    }
+  }
+  let kind = 0;
+  if (options.schema !== undefined && options.schema !== null) {
+    if (typeof options.schema !== "string" || !(options.schema in SCHEMA_KINDS)) {
+      throw new TypeError(
+        `yeptris: ${who} option schema must be ` +
+          `"core", "compat", "json", or "full" (got ` +
+          JSON.stringify(options.schema) + ")");
+    }
+    kind = SCHEMA_KINDS[options.schema];
+  }
+  let maxDepth = 0;
+  if (options.maxDepth !== undefined && options.maxDepth !== null) {
+    if (typeof options.maxDepth !== "number" || !Number.isInteger(options.maxDepth) ||
+        options.maxDepth < 0) {
+      throw new TypeError(
+        `yeptris: ${who} option maxDepth must be a non-negative integer (got ` +
+          JSON.stringify(options.maxDepth) + ")");
+    }
+    maxDepth = options.maxDepth;
+  }
+  return { kind, maxDepth };
+}
+
+function eachDocumentCore(mod, yaml, options) {
   return (function* () {
+    const { kind, maxDepth } = parseEachOptions(options, "eachDocument");
     const [ptr, len] = cstr(mod, yaml);
     try {
-      const openSt = mod._yeptris_wasm_each_open(ptr, len);
+      const openSt = mod._yeptris_wasm_each_open(ptr, len, kind, maxDepth);
       if (openSt !== 0) {
         throw failFrom(mod);
       }
@@ -588,16 +636,22 @@ function eachDocumentCore(mod, yaml) {
  * walk; an unrecoverable tail ends it. Lazy: nothing parses until
  * iteration starts. Documents materialize through load's serialize
  * door, so each frame's value is load's value by construction. The
- * engine default (schema 1.2 core) rides as-is. */
-export async function* eachDocument(yaml) {
+ * options door (the other three faces' vocabulary): schema —
+ *   "core" (default) the YAML 1.2 core family (the engine default);
+ *   "compat" the libyaml/Psych 1.1 implicit typing;
+ *   "json" the spec 10.2 JSON productions; "full" the full 1.2 family
+ * (explicit tags + carried-forward set) — and maxDepth (0 = the
+ * library default) caps nesting per frame. Unknown option keys throw
+ * TypeError (nothing silently dropped). */
+export async function* eachDocument(yaml, options) {
   const m = await mod();
-  yield* eachDocumentCore(m, yaml);
+  yield* eachDocumentCore(m, yaml, options);
 }
 
 /** eachDocument's Sync twin: a sync generator over an initialized
  * module (await init() first). */
-export function eachDocumentSync(yaml) {
-  return eachDocumentCore(requireMod("eachDocumentSync"), yaml);
+export function eachDocumentSync(yaml, options) {
+  return eachDocumentCore(requireMod("eachDocumentSync"), yaml, options);
 }
 
 // ---- load/dump cores (shared by the async and Sync forms) --------------
@@ -750,9 +804,11 @@ function eventsCore(mod, yaml, options) {
     const recs = mod._yeptris_wasm_event_records();
     const arena = mod._yeptris_wasm_event_arena();
     // Heap views fetched AFTER the call: the feed may have grown the
-    // memory, and the exported views are re-bound on growth.
-    const u8 = mod.HEAPU8;
-    const u32 = mod.HEAPU32;
+    // memory, and the views must reflect the grown buffer. emsdk 3.x
+    // rides the views on the Module; 4+ removed them — rebuild the
+    // views over wasmMemory's buffer there (the ABI is the same).
+    const u8 = mod.HEAPU8 ?? new Uint8Array(mod.wasmMemory.buffer);
+    const u32 = mod.HEAPU32 ?? new Uint32Array(mod.wasmMemory.buffer);
     const out = new Array(n);
     for (let i = 0; i < n; i++) {
       const base = recs + i * EV_RECORD_SIZE;

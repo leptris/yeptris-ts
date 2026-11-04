@@ -502,11 +502,15 @@ void yeptris_wasm_events_free(void) {
  * face: open (feed, copy, construct), next() repeatedly, close always
  * (the JS generator's finally is the owner).
  *
- * The base four functions only (new/next/status/free) — this face
- * ships against the v0.6.60 engine, whose iterator predates the slice
- * accessors; the frame document crosses as JSON through the same
- * g_out discipline every answer uses (a frame is a dcount==1 forest,
- * so serialize_json answers it directly — the load path). */
+ * The base four functions plus the options door (#28): schema and
+ * max_depth ride the engine's YeptrisParseOptions on EVERY frame (the
+ * iterator's shared resolver) — schema_kind is a YeptrisSchema value
+ * (0 = 12_CORE default, 1 = 11_COMPAT, 2 = 12_JSON, 3 = 12_FULL),
+ * max_depth 0 = the library default. This face ships against the
+ * v0.6.60 engine, whose iterator predates the slice accessors; the
+ * frame document crosses as JSON through the same g_out discipline
+ * every answer uses (a frame is a dcount==1 forest, so
+ * serialize_json answers it directly — the load path). */
 static yeptris_stream_iter *g_it;
 static char *g_it_buf; /* the borrowed input's retained copy */
 static size_t g_it_buf_len;
@@ -514,7 +518,8 @@ static int g_it_frame;  /* 1: g_out carries a document JSON; 0: none */
 static int g_it_index;  /* the last next() step's consumed stream index */
 
 EMSCRIPTEN_KEEPALIVE
-int yeptris_wasm_each_open(const char *data, size_t len) {
+int yeptris_wasm_each_open(const char *data, size_t len, int schema_kind,
+                           int max_depth) {
     if (g_it != NULL) { /* defensive: the previous walk was not closed */
         yeptris_stream_iter_free(g_it);
         g_it = NULL;
@@ -533,7 +538,15 @@ int yeptris_wasm_each_open(const char *data, size_t len) {
         memcpy(g_it_buf, data, len);
     }
     g_it_buf_len = len;
-    g_it = yeptris_stream_iter_new(g_it_buf, len, NULL);
+    if (schema_kind == 0 && max_depth == 0) {
+        g_it = yeptris_stream_iter_new(g_it_buf, len, NULL);
+    } else {
+        YeptrisParseOptions opts;
+        memset(&opts, 0, sizeof(opts));
+        opts.schema = (YeptrisSchema)schema_kind;
+        opts.max_depth = max_depth;
+        g_it = yeptris_stream_iter_new(g_it_buf, len, &opts);
+    }
     if (g_it == NULL) {
         free(g_it_buf);
         g_it_buf = NULL;
