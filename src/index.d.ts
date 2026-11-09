@@ -187,6 +187,24 @@ export type EachDocumentResult =
   | { document: unknown; index: number; error: undefined }
   | { document: undefined; index: number; error: YamlError };
 
+/** eachDocument's options door (the engine's YeptrisParseOptions —
+ * the ruby `each_document(yaml, schema:, max_depth:)` / py
+ * `each_document(yaml, schema=, max_depth=)` parity). Unknown or
+ * mistyped options throw TypeError. The compiled/JSON-Schema walks
+ * have no seat on the walk — the iterator carries a resolver kind,
+ * not a schema document; those doors ride validate()/load(). */
+export interface EachDocumentOptions {
+  /** The resolver family every frame types its plain scalars
+   *  through (the parse resolver's kind, the js-yaml parity names
+   *  this face uses for validate/load): "core" (default) — the
+   *  YAML 1.2 core resolver; "json" — the spec 10.2 JSON resolver. */
+  schema?: "core" | "json";
+  /** Maximum nesting depth per frame (0 = the library default). A
+   *  frame past the cap fails as that frame's error item and the
+   *  walk CONTINUES at the next `---` marker. */
+  max_depth?: number;
+}
+
 /** Walk a multi-document stream one document at a time, TOLERANTLY
  * (the engine's stream iterator): an async generator of
  * EachDocumentResult in stream order. A parse-class failure carries
@@ -197,9 +215,11 @@ export type EachDocumentResult =
  * yield their item and end the walk; an unrecoverable tail ends it.
  * Lazy: nothing parses until iteration starts. Documents materialize
  * through load's serialize door (the engine's default, schema 1.2
- * core). */
+ * core). options selects the resolver family and the per-frame depth
+ * cap (ruby/py parity). */
 export declare function eachDocument(
   yaml: string,
+  options?: EachDocumentOptions,
 ): AsyncGenerator<EachDocumentResult, void, undefined>;
 
 /** Options for dump (js-yaml parity names over emit.h's
@@ -288,9 +308,10 @@ export declare function compileSchemaSync(jsonSchema: object | string): Schema;
 
 /** eachDocument's Sync twin: a sync generator over an initialized
  * module (await init() first). Throws unless the module is
- * initialized. */
+ * initialized. Takes the same options door as eachDocument. */
 export declare function eachDocumentSync(
   yaml: string,
+  options?: EachDocumentOptions,
 ): Generator<EachDocumentResult, void, undefined>;
 
 /** version's Sync twin. Throws unless the module is initialized. */

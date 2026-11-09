@@ -794,3 +794,125 @@ test("eachDocument: closed walks free their state (no retained wasm buffer)", as
   assert.notEqual(mod._yeptris_wasm_each_next(), 0);
   void eachDocument;
 });
+
+// ---- the options door (schema/max_depth — ruby/py parity) ----
+
+test("eachDocument: the schema door retypes every frame (core vs json)", async () => {
+  const { eachDocument } = await import("../src/index.js");
+  // the face default rides the engine's 1.2 core resolver (the NULL
+  // opts contract); the json family is the parse resolver's kind —
+  // it has no True/FALSE/~ productions, so those plain scalars stay
+  // strings while the JSON ones (true, 1.5) type identically
+  const src = "--- True\n--- FALSE\n--- ~\n--- true\n--- 1.5\n";
+  const core = [];
+  for await (const it of eachDocument(src)) core.push(it.document);
+  assert.deepEqual(core, [true, false, null, true, 1.5]);
+  const json = [];
+  for await (const it of eachDocument(src, { schema: "json" })) json.push(it.document);
+  assert.deepEqual(json, ["True", "FALSE", "~", true, 1.5]);
+});
+
+test("eachDocument: max_depth bounds each frame and the walk recovers", async () => {
+  const { eachDocument } = await import("../src/index.js");
+  const deep = "[".repeat(50) + "]".repeat(50);
+  // the library default cap (0 rides it) parses the 50-deep frame
+  const plain = [];
+  for await (const it of eachDocument(`--- ${deep}\n`)) plain.push(it);
+  assert.equal(plain.length, 1);
+  assert.ok(Array.isArray(plain[0].document));
+  assert.equal(plain[0].error, undefined);
+  // max_depth 10 fails the deep frame as ITS OWN item — the why is
+  // the engine's depth verdict — and the walk continues at the next
+  // marker, keeping the valid tail (the ruby face's pin)
+  const items = [];
+  for await (const it of eachDocument(`--- ${deep}\n--- recovered\n`, { max_depth: 10 })) {
+    items.push(it);
+  }
+  assert.equal(items.length, 2);
+  assert.equal(items[0].document, undefined);
+  assert.match(items[0].error.message, /depth/);
+  assert.equal(items[0].index, 0);
+  assert.equal(items[1].document, "recovered");
+  assert.equal(items[1].index, 1);
+});
+
+test("eachDocument: an options object arms the door at the same defaults", async () => {
+  const { eachDocument } = await import("../src/index.js");
+  const src = "--- 41\n--- [1]\n---\n";
+  const ride = [];
+  for await (const it of eachDocument(src)) ride.push(it.document);
+  const empty = [];
+  for await (const it of eachDocument(src, {})) empty.push(it.document);
+  const explicit = [];
+  for await (const it of eachDocument(src, { schema: "core", max_depth: 0 })) {
+    explicit.push(it.document);
+  }
+  const nulled = [];
+  for await (const it of eachDocument(src, null)) nulled.push(it.document);
+  // zeroed options are the parse defaults (parse.h): identical to the
+  // NULL ride — the face's shipped v1 contract either way
+  assert.deepEqual(empty, ride);
+  assert.deepEqual(explicit, ride);
+  assert.deepEqual(nulled, ride);
+});
+
+test("eachDocument: the options door is strict (unknown or mistyped keys throw)", async () => {
+  const { eachDocument, eachDocumentSync, compileSchema } = await import("../src/index.js");
+  const bad = (opts) => async () => {
+    for await (const _ of eachDocument("--- 1\n", opts)) void _;
+  };
+  await assert.rejects(bad({ schema: "compat" }), /schema must be/);
+  await assert.rejects(bad({ schema: 2 }), /schema must be/);
+  await assert.rejects(bad({ schema: "core", jsonSchema: {} }), /not supported/);
+  await assert.rejects(bad({ max_depth: 1.5 }), /max_depth/);
+  await assert.rejects(bad({ max_depth: -1 }), /max_depth/);
+  await assert.rejects(bad({ collect: true }), /not supported/);
+  await assert.rejects(bad("core"), /must be an object/);
+  // the compiled/JSON-Schema doors have no seat on the walk — the
+  // iterator takes the resolver kind, not a schema document
+  const s = await compileSchema({ type: "object" });
+  await assert.rejects(bad({ schema: s }), /validate\(\)\/load\(\)/);
+  s.free();
+  // the Sync twin validates at call time
+  assert.throws(() => eachDocumentSync("--- 1\n", { schema: "compat" }), /schema must be/);
+  assert.throws(() => eachDocumentSync("--- 1\n", { max_depth: "10" }), /max_depth/);
+});
+
+test("eachDocumentSync: the options door rides synchronously", async () => {
+  const I = await import("../src/index.js");
+  await I.init();
+  const items = [...I.eachDocumentSync("--- True\n--- {{{{ bad\n--- 3\n", { schema: "json" })];
+  assert.equal(items[0].document, "True");
+  assert.ok(items[1].error instanceof Error);
+  assert.equal(items[2].document, 3);
+});
+
+test("eachDocument: the capability probe refuses options on a stale shim", async () => {
+  const { eachDocument, eachDocumentSync, wasmModule } = await import("../src/index.js");
+  const mod = await wasmModule();
+  const realEx = mod._yeptris_wasm_each_open_ex;
+  // the pre-door shim: the _ex export simply isn't there (the v1 open
+  // keeps its frozen 2-param ABI). Hide the export and pin both
+  // halves of the probe: the no-options walk keeps working (the v1
+  // contract on the old era), the door refuses loudly instead of
+  // pretending the options had a seat.
+  mod._yeptris_wasm_each_open_ex = undefined;
+  try {
+    const items = [];
+    for await (const it of eachDocument("--- 1\n--- 2\n")) items.push(it.document);
+    assert.deepEqual(items, [1, 2]);
+    await assert.rejects(
+      async () => {
+        for await (const _ of eachDocument("--- 1\n", { schema: "json" })) void _;
+      },
+      /options door/,
+    );
+    assert.throws(() => [...eachDocumentSync("--- 1\n", { max_depth: 5 })], /options door/);
+  } finally {
+    mod._yeptris_wasm_each_open_ex = realEx;
+  }
+  // the export is back: the door answers again
+  const items = [];
+  for await (const it of eachDocument("--- 0o7\n", { schema: "json" })) items.push(it.document);
+  assert.deepEqual(items, ["0o7"]);
+});
