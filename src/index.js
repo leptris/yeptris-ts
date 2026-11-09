@@ -526,18 +526,99 @@ function compileSchemaCore(mod, jsonSchema) {
 //
 // The JS shape is the rs face's: an iterator of result objects —
 // `{ document, index }` for a valid document, `{ error, index }` for
-// a failed one. The engine default (schema 1.2 core) rides as-is; the
-// options door (schema/max_depth) is the engine's parse-options struct
-// and joins when the face needs it.
+// a failed one. The engine default (schema 1.2 core) rides as-is;
+// the options door (schema/max_depth — ruby/py parity) fills the
+// engine's parse-options struct through the shim's open params.
 
 const ST_MEMORY = 2; // YEPTRIS_ERROR_MEMORY — stream-fatal
 const ST_ENCODING = 4; // YEPTRIS_ERROR_ENCODING — stream-fatal
 
-function eachDocumentCore(mod, yaml) {
+// eachDocument's options door (the engine's YeptrisParseOptions, the
+// ruby `each_document(yaml, schema:, max_depth:)` / py
+// `each_document(yaml, schema=, max_depth=)` parity): `schema` is the
+// resolver family every frame types its plain scalars through (the
+// parse resolver's kind, spelled the js-yaml parity way this face
+// already uses for validate/load — "core" the 1.2 core default,
+// "json" the spec 10.2 JSON resolver), `max_depth` caps per-frame
+// nesting (0 = the library default; a frame past the cap fails as
+// that frame's error item and the walk continues at the next marker).
+// The compiled/JSON-Schema doors have no seat on the walk — the
+// iterator carries a resolver KIND, not a schema document; those
+// doors ride validate/load. Strictness law (the dump precedent):
+// unknown or mistyped keys are rejected, never silently ignored.
+// With no options the shim keeps its NULL ride — the engine defaults,
+// the face's shipped v1 contract — byte-identical to the pre-door era.
+function parseEachOptions(options, who) {
+  if (options === undefined || options === null) {
+    return { kind: -1, maxDepth: 0 }; // -1: the shim's NULL-opts ride
+  }
+  if (typeof options !== "object") {
+    throw new TypeError(`yeptris: ${who} options must be an object`);
+  }
+  const KEYS = new Set(["schema", "max_depth"]);
+  for (const key of Object.keys(options)) {
+    if (!KEYS.has(key)) {
+      throw new TypeError(
+        `yeptris: ${who} option "${key}" is not supported ` +
+          "(the surface is schema + max_depth)");
+    }
+  }
+  let kind = 0; // an options object arms the door: the 1.2 core family
+  if (options.schema !== undefined && options.schema !== null) {
+    if (options.schema instanceof Schema) {
+      throw new TypeError(
+        `yeptris: ${who}: a compiled Schema rides validate()/load(), ` +
+          "not the walk — the iterator takes the resolver kind " +
+          '(schema: "core" | "json")');
+    }
+    if (typeof options.schema !== "string" ||
+        (options.schema !== "core" && options.schema !== "json")) {
+      throw new TypeError(
+        `yeptris: ${who} option schema must be "core" or "json" (got ` +
+          JSON.stringify(options.schema) + ")");
+    }
+    kind = options.schema === "json" ? 2 : 0; // YEPTRIS_SCHEMA_12_JSON / _12_CORE
+  }
+  let maxDepth = 0;
+  if (options.max_depth !== undefined && options.max_depth !== null) {
+    const d = options.max_depth;
+    if (typeof d !== "number" || !Number.isInteger(d) || d < 0) {
+      throw new TypeError(
+        `yeptris: ${who} option max_depth must be a non-negative integer ` +
+          "(0 rides the library default)");
+    }
+    maxDepth = d;
+  }
+  return { kind, maxDepth };
+}
+
+function eachDocumentCore(mod, yaml, vo) {
   return (function* () {
     const [ptr, len] = cstr(mod, yaml);
     try {
-      const openSt = mod._yeptris_wasm_each_open(ptr, len);
+      // The capability probe: the door rides a NEW export (the v1
+      // open's 2-param wasm ABI stays frozen — this surface's ABI is
+      // append-only), so a dist built before the door simply lacks
+      // it. The probe is the missing-export check's own idiom, and it
+      // gates the DOOR ONLY: the no-options walk is the v1 contract
+      // and rides either era unchanged. Without the probe wasm would
+      // never even see the call — the export isn't there to call —
+      // and the options would have no seat at all; with it, a stale
+      // dist is refused loudly instead of pretending.
+      let openSt;
+      if (vo.kind >= 0) {
+        const openEx = mod._yeptris_wasm_each_open_ex;
+        if (typeof openEx !== "function") {
+          throw new Error(
+            "yeptris: the eachDocument options door needs a dist rebuilt " +
+              "with build.sh — the loaded wasm predates the options era " +
+              "(stale artifact)",
+          );
+        }
+        openSt = openEx(ptr, len, vo.kind, vo.maxDepth);
+      } else {
+        openSt = mod._yeptris_wasm_each_open(ptr, len);
+      }
       if (openSt !== 0) {
         throw failFrom(mod);
       }
@@ -587,17 +668,26 @@ function eachDocumentCore(mod, yaml) {
  * stream-fatal classes (memory/encoding) yield their item and end the
  * walk; an unrecoverable tail ends it. Lazy: nothing parses until
  * iteration starts. Documents materialize through load's serialize
- * door, so each frame's value is load's value by construction. The
- * engine default (schema 1.2 core) rides as-is. */
-export async function* eachDocument(yaml) {
+ * door, so each frame's value is load's value by construction.
+ *
+ * options (the engine's parse options — ruby/py parity): schema —
+ * the resolver family every frame types through, "core" (default) or
+ * "json"; max_depth — the per-frame nesting cap, 0 = the library
+ * default (a frame past the cap fails as that frame's item and the
+ * walk continues). Unknown or mistyped options throw TypeError. */
+export async function* eachDocument(yaml, options) {
   const m = await mod();
-  yield* eachDocumentCore(m, yaml);
+  yield* eachDocumentCore(m, yaml, parseEachOptions(options, "eachDocument"));
 }
 
 /** eachDocument's Sync twin: a sync generator over an initialized
- * module (await init() first). */
-export function eachDocumentSync(yaml) {
-  return eachDocumentCore(requireMod("eachDocumentSync"), yaml);
+ * module (await init() first). Takes the same options door. */
+export function eachDocumentSync(yaml, options) {
+  return eachDocumentCore(
+    requireMod("eachDocumentSync"),
+    yaml,
+    parseEachOptions(options, "eachDocumentSync"),
+  );
 }
 
 // ---- load/dump cores (shared by the async and Sync forms) --------------
