@@ -23,7 +23,7 @@ env:
   # on engine main but not yet in a release tag. Re-point at the next
   # release tag BEFORE dispatching this workflow when the engine train
   # cuts.
-  ENGINE_REF: e11a235540e0d3e49997af635bc15594f703c4b1 # the v0.6.62 tag
+  ENGINE_REF: 278c739cdda947445e19c15f86f7de1f376ebc8a # the v0.6.63 tag
 
 jobs:
   publish:
