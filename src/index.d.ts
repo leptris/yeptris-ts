@@ -91,6 +91,124 @@ export declare class Schema {
  * for bytes that do not parse. */
 export declare function compileSchema(jsonSchema: object | string): Promise<Schema>;
 
+// ---- the plan face (plan.h; the compiled columnar walk) ----------------
+
+/** The columnar result of one plan walk. Produced by Plan.walk(); the
+ * accessors COPY their answers out of the retained walk state — free()
+ * releases it. After free() reuse throws; a STALE result (a newer
+ * walk() replaced the retained state) throws too — never a silent
+ * wrong answer. */
+export declare class PlanResult {
+  private constructor();
+  /** The number of rows (one per row of the rows container). */
+  get rows(): number;
+  /** The leaf kind of column `col`: "int" | "float" | "str" | "bool". */
+  kind(col: number): string;
+  /** INT column values as JS numbers. BOOL columns read through here
+   *  too, as 0/1 (the engine's columnar contract). Exact within
+   *  +/-2^53; the engine's int64 beyond that rounds, per JS number. */
+  ints(col: number): number[];
+  /** FLOAT column values as JS numbers (the f64 lane, copied). */
+  floats(col: number): number[];
+  /** STR column values as JS strings (decoded out of the walk's
+   *  (ptr,len) views). */
+  strs(col: number): string[];
+  /** The column's null markers: 1 = the row's leaf was null or
+   *  missing. A Uint8Array copy of `rows` entries. */
+  nulls(col: number): Uint8Array;
+  /** True once free() ran. */
+  get freed(): boolean;
+  /** Releases the retained walk (result + document + input copy).
+   *  Idempotent. A stale result only dies locally — the retained
+   *  state belongs to the walk that replaced it. */
+  free(): void;
+}
+
+/** A COMPILED plan (plan.h): the query spec parses once and walks
+ * many documents. Build with compilePlan(); after free() reuse
+ * throws. */
+export declare class Plan {
+  private constructor();
+  /** The number of leaf columns the spec declared. */
+  get columnCount(): number;
+  /** Apply the plan to a YAML document (the DOM leg): typed columns,
+   *  one C pass. Synchronous — the handle only exists once the module
+   *  is initialized. Throws YamlError when the document does not
+   *  parse or its shape disagrees with the plan. */
+  walk(yaml: string): PlanResult;
+  /** True once free() ran. */
+  get freed(): boolean;
+  /** Frees the handle. Idempotent; afterwards reuse throws. */
+  free(): void;
+}
+
+/** Compile a plan from a strict-JSON spec document (object or string;
+ * the shape plan.h spells: kind "seq"|"map", path string|string[],
+ * children of { name, kind: "int"|"float"|"str"|"bool" }). Throws
+ * TypeError for empty/absent spec bytes and YamlError for bytes that
+ * do not parse or name no engine kind. */
+export declare function compilePlan(spec: object | string): Promise<Plan>;
+
+// ---- the tape face (tape.h; the columnar JSON parse) -------------------
+
+/** The tape record kinds (tape.h's YEP_T_*, ABI-pinned). `kinds` in
+ * JsonTape.columns() answers these raw bytes. */
+export const TAPE_KINDS: Readonly<{
+  doc: 0;
+  null: 1;
+  true: 2;
+  false: 3;
+  int: 4;
+  float: 5;
+  str: 6;
+  "seq-open": 7;
+  "map-open": 8;
+  close: 9;
+  num: 10;
+}>;
+
+/** One column materialization: three parallel arrays, one entry per
+ * record. `kinds` answers TAPE_KINDS bytes; `offs`/`lens` are span
+ * starts and lengths into the SOURCE for str/int/float records and
+ * container links (matching open/close) for open/close records. */
+export interface TapeColumns {
+  kinds: Uint8Array;
+  offs: Uint32Array;
+  lens: Uint32Array;
+}
+
+/** A parsed JSON tape (tape.h): the record stream of one strict
+ * parse. Build with parseJsonTape(); after free() reuse throws; a
+ * newer parseJsonTape() makes older tape objects stale — they refuse
+ * instead of answering the newer records. */
+export declare class JsonTape {
+  private constructor();
+  /** The number of records (one per token, the document boundary
+   *  record included). */
+  get count(): number;
+  /** The three parallel columns, materialized and copied out of the
+   *  heap. */
+  columns(): TapeColumns;
+  /** Convert the number records in `[from, to)` (record indices;
+   *  defaults convert every number record): DENSE answers in tape
+   *  order — the INT records' converted values and the FLOAT records'
+   *  (a lenient route's `num` record converts as a float). Exact
+   *  within +/-2^53. */
+  convert(from?: number, to?: number): { ints: number[]; floats: number[] };
+  /** True once free() ran. */
+  get freed(): boolean;
+  /** Releases the retained tape and its input copy. Idempotent;
+   *  afterwards reuse throws. */
+  free(): void;
+}
+
+/** Parse strict JSON into the columnar tape (tape.h): one record per
+ * token, no DOM — the simdjson-class materialization. Scalar roots
+ * ride (a single record after the boundary). Throws YamlError with
+ * line/column on malformed input (the strict route validates the
+ * number grammar at parse). */
+export declare function parseJsonTape(json: string): Promise<JsonTape>;
+
 /** Validate a YAML stream, answering the WHOLE report: every
  * diagnostic, in engine order ([] when valid). Without options the
  * core-family walk runs. Throws YamlError when the stream does not
@@ -305,6 +423,12 @@ export declare function isValidSync(
 
 /** compileSchema's Sync twin. Throws unless the module is initialized. */
 export declare function compileSchemaSync(jsonSchema: object | string): Schema;
+
+/** compilePlan's Sync twin. Throws unless the module is initialized. */
+export declare function compilePlanSync(spec: object | string): Plan;
+
+/** parseJsonTape's Sync twin. Throws unless the module is initialized. */
+export declare function parseJsonTapeSync(json: string): JsonTape;
 
 /** eachDocument's Sync twin: a sync generator over an initialized
  * module (await init() first). Throws unless the module is

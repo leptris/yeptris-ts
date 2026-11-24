@@ -278,6 +278,17 @@ test("module guard: the built dist carries every guarded export", async () => {
                     "_yeptris_wasm_validate", "_yeptris_wasm_json_schema_validate",
                     "_yeptris_wasm_schema_compile", "_yeptris_wasm_schema_validate",
                     "_yeptris_wasm_schema_free",
+                    "_yeptris_wasm_plan_compile", "_yeptris_wasm_plan_free",
+                    "_yeptris_wasm_plan_column_count", "_yeptris_wasm_plan_walk",
+                    "_yeptris_wasm_plan_seq", "_yeptris_wasm_plan_rows",
+                    "_yeptris_wasm_plan_kind", "_yeptris_wasm_plan_ints",
+                    "_yeptris_wasm_plan_floats", "_yeptris_wasm_plan_strs",
+                    "_yeptris_wasm_plan_nulls", "_yeptris_wasm_plan_walk_free",
+                    "_yeptris_wasm_tape_parse", "_yeptris_wasm_tape_seq",
+                    "_yeptris_wasm_tape_count", "_yeptris_wasm_tape_columns",
+                    "_yeptris_wasm_tape_kinds", "_yeptris_wasm_tape_offs",
+                    "_yeptris_wasm_tape_lens", "_yeptris_wasm_tape_convert",
+                    "_yeptris_wasm_tape_free",
                     "_yeptris_wasm_out", "_yeptris_wasm_last_error", "_yeptris_wasm_free",
                     "_malloc"]) {
     assert.equal(typeof m[fn], "function", `${fn} must be exported`);
@@ -915,4 +926,281 @@ test("eachDocument: the capability probe refuses options on a stale shim", async
   const items = [];
   for await (const it of eachDocument("--- 0o7\n", { schema: "json" })) items.push(it.document);
   assert.deepEqual(items, ["0o7"]);
+});
+
+// ---- the plan face (plan.h; the compiled columnar walk) ------------------
+//
+// The rs face (yeptris-rs 0.6.78, src/lib.rs `pub mod plan`) is the
+// reference shape: compile once from a strict-JSON spec, apply to a
+// document in ONE C pass, read typed columns. Across the wasm boundary
+// the walk is RETAINED state (the result borrows the document, the
+// document borrows the input copy), and every accessor COPIES its
+// answer out of the heap — nothing engine-owned survives free().
+
+const PLAN_SPEC = JSON.stringify({
+  kind: "seq",
+  path: "items",
+  children: [
+    { name: "id", kind: "int" },
+    { name: "score", kind: "float" },
+    { name: "tag", kind: "str" },
+    { name: "ok", kind: "bool" },
+  ],
+});
+
+const PLAN_DOC = [
+  "items:",
+  "  - {id: 7, score: 0.5, tag: x, ok: true}",
+  "  - {id: 9, score: 1.5, tag: y, ok: false}",
+  "",
+].join("\n");
+
+test("compilePlan: one compile, many walks (the economy)", async () => {
+  const { compilePlan } = await import("../src/index.js");
+  const plan = await compilePlan(PLAN_SPEC);
+  assert.equal(plan.columnCount, 4);
+  const r1 = plan.walk(PLAN_DOC);
+  assert.equal(r1.rows, 2);
+  const r2 = plan.walk("items:\n  - {id: 1, score: 2.5, tag: z, ok: true}\n");
+  assert.equal(r2.rows, 1);
+  r1.free();
+  r2.free();
+  plan.free();
+});
+
+test("plan walk: typed columns pin the rs contract (bools read as 0/1)", async () => {
+  const { compilePlan } = await import("../src/index.js");
+  const plan = await compilePlan(PLAN_SPEC);
+  const r = plan.walk(PLAN_DOC);
+  assert.equal(r.kind(0), "int");
+  assert.equal(r.kind(1), "float");
+  assert.equal(r.kind(2), "str");
+  assert.equal(r.kind(3), "bool");
+  assert.deepEqual(r.ints(0), [7, 9]);
+  assert.deepEqual(r.floats(1), [0.5, 1.5]);
+  assert.deepEqual(r.strs(2), ["x", "y"]);
+  assert.deepEqual(r.ints(3), [1, 0]); // bools read through ints (the engine's columnar contract)
+  assert.deepEqual(Array.from(r.nulls(0)), [0, 0]);
+  r.free();
+  plan.free();
+});
+
+test("plan walk: null and missing leaves mark the slot null", async () => {
+  const { compilePlan } = await import("../src/index.js");
+  const plan = await compilePlan(
+    JSON.stringify({ kind: "seq", path: "items", children: [{ name: "id", kind: "int" }] }));
+  const r = plan.walk("items:\n  - {id: 7}\n  - {id: null}\n  - {id: 8}\n");
+  assert.equal(r.rows, 3);
+  assert.equal(r.ints(0)[0], 7);
+  assert.equal(r.ints(0)[2], 8);
+  assert.deepEqual(Array.from(r.nulls(0)), [0, 1, 0]);
+  r.free();
+  plan.free();
+});
+
+test("plan walk: a map-of-rows root walks the mapping values", async () => {
+  const { compilePlan } = await import("../src/index.js");
+  const plan = await compilePlan(
+    JSON.stringify({ kind: "map", path: "rows", children: [{ name: "id", kind: "int" }] }));
+  const r = plan.walk("rows:\n  r1: {id: 1}\n  r2: {id: 2}\n");
+  assert.equal(r.rows, 2);
+  assert.deepEqual(r.ints(0), [1, 2]);
+  r.free();
+  plan.free();
+});
+
+test("plan walk: a segmented path walks mapping by mapping", async () => {
+  const { compilePlan } = await import("../src/index.js");
+  const plan = await compilePlan(JSON.stringify({
+    kind: "seq",
+    path: ["outer", "items"],
+    children: [{ name: "id", kind: "int" }],
+  }));
+  const r = plan.walk("outer:\n  items:\n    - id: 5\n    - id: 6\n");
+  assert.equal(r.rows, 2);
+  assert.deepEqual(r.ints(0), [5, 6]);
+  r.free();
+  plan.free();
+});
+
+test("plan walk: a shape disagreement raises, never lies", async () => {
+  const { compilePlan } = await import("../src/index.js");
+  const plan = await compilePlan(PLAN_SPEC);
+  await assert.rejects(
+    () => Promise.resolve().then(() => plan.walk("other: 1\n")),
+    (e) => e.name === "YamlError");
+  plan.free();
+});
+
+test("compilePlan: a malformed spec raises (bad JSON carries the byte)", async () => {
+  const { compilePlan } = await import("../src/index.js");
+  await assert.rejects(
+    () => compilePlan('{"kind": '),
+    // the engine's JSON walk positions by byte offset in the message
+    // (line/col are 0 — that channel is the YAML reader's)
+    (e) => e.name === "YamlError" && /byte 9/.test(e.message));
+  // a spec that parses but names no engine kind is refused too
+  await assert.rejects(
+    () => compilePlan('{"kind": "table", "path": "items"}'),
+    (e) => e.name === "YamlError");
+});
+
+test("Plan: direct construction is refused; free is idempotent; reuse after free throws", async () => {
+  const { compilePlan, Plan } = await import("../src/index.js");
+  assert.throws(() => new Plan(), TypeError);
+  const plan = await compilePlan(PLAN_SPEC);
+  const r = plan.walk(PLAN_DOC);
+  assert.equal(plan.freed, false);
+  plan.free();
+  assert.equal(plan.freed, true);
+  plan.free(); // idempotent
+  assert.throws(() => plan.walk(PLAN_DOC), /freed/);
+  // the result object is dead with the walk it came from: its accessors
+  // refuse after the plan's walk state was released
+  r.free();
+  assert.equal(r.freed, true);
+  r.free();
+  assert.throws(() => r.rows, /freed/);
+});
+
+test("plan walk: a stale result refuses to answer (walk A, then walk B)", async () => {
+  const { compilePlan } = await import("../src/index.js");
+  const plan = await compilePlan(PLAN_SPEC);
+  const a = plan.walk(PLAN_DOC);
+  const b = plan.walk("items:\n  - {id: 1, score: 2.5, tag: z, ok: true}\n");
+  // the walk is the shim's retained state: a's accessors would silently
+  // answer b's data — they refuse instead
+  assert.throws(() => a.rows, /stale/);
+  assert.equal(b.rows, 1);
+  assert.deepEqual(b.ints(0), [1]);
+  b.free();
+  a.free();
+  plan.free();
+});
+
+test("plan walk: the retained state frees after every walk (success and error)", async () => {
+  const { compilePlan, wasmModule } = await import("../src/index.js");
+  const mod = await wasmModule();
+  const plan = await compilePlan(PLAN_SPEC);
+  const r = plan.walk(PLAN_DOC);
+  r.free();
+  assert.equal(mod._yeptris_wasm_plan_rows(), 0, "walk not freed after free()");
+  assert.equal(mod._yeptris_wasm_plan_ints(0), 0);
+  await assert.rejects(() => Promise.resolve().then(() => plan.walk("other: 1\n")));
+  assert.equal(mod._yeptris_wasm_plan_rows(), 0, "walk not freed after an error");
+  plan.free();
+});
+
+test("compilePlanSync + walk: the plan face rides synchronously after init", async () => {
+  const { init, compilePlanSync } = await import("../src/index.js");
+  await init();
+  const plan = compilePlanSync(PLAN_SPEC);
+  const r = plan.walk(PLAN_DOC);
+  assert.equal(r.rows, 2);
+  assert.deepEqual(r.ints(0), [7, 9]);
+  r.free();
+  plan.free();
+});
+
+// ---- the tape face (tape.h; the columnar JSON parse) ---------------------
+//
+// One fused strict walk appends ONE record per token — no DOM, no
+// views: kinds/offs/lens columns, numbers recorded as spans, strings
+// zero-copy into the caller's buffer. yeptris_tape_columns
+// materializes the compat columns (the shim calls it before handing
+// out pointers); yeptris_tape_convert converts the number spans
+// (the authority for the lenient route's deferred NUM records too).
+
+test("parseJsonTape: the record stream pins the strict walk", async () => {
+  const { parseJsonTape, TAPE_KINDS } = await import("../src/index.js");
+  const src = '{"a":"hi","n":2.5}';
+  const tape = await parseJsonTape(src);
+  assert.equal(tape.count, 7);
+  const cols = tape.columns();
+  assert.deepEqual(Array.from(cols.kinds), [
+    TAPE_KINDS.doc,
+    TAPE_KINDS["map-open"],
+    TAPE_KINDS.str,
+    TAPE_KINDS.str,
+    TAPE_KINDS.str,
+    TAPE_KINDS.float,
+    TAPE_KINDS.close,
+  ]);
+  // the container links ride the off column (matching open/close)
+  assert.equal(cols.offs[1], 6);
+  assert.equal(cols.offs[6], 1);
+  // the value span is zero-copy into the source: decode against it
+  assert.equal(src.slice(cols.offs[3], cols.offs[3] + cols.lens[3]), "hi");
+  tape.free();
+});
+
+test("tape convert: numbers convert dense and in tape order", async () => {
+  const { parseJsonTape } = await import("../src/index.js");
+  const tape = await parseJsonTape('{"i":3,"f":0.25,"j":7}');
+  assert.deepEqual(tape.convert(), { ints: [3, 7], floats: [0.25] });
+  tape.free();
+});
+
+test("tape convert: the [from,to) window slices by record index", async () => {
+  const { parseJsonTape } = await import("../src/index.js");
+  const tape = await parseJsonTape('{"i":3,"f":0.25,"j":7}');
+  assert.deepEqual(tape.convert(4, tape.count), { ints: [7], floats: [0.25] });
+  assert.deepEqual(tape.convert(0, 4), { ints: [3], floats: [] });
+  tape.free();
+});
+
+test("parseJsonTape: scalar roots ride (a single record after the boundary)", async () => {
+  const { parseJsonTape, TAPE_KINDS } = await import("../src/index.js");
+  const num = await parseJsonTape("42");
+  assert.equal(num.count, 2);
+  assert.deepEqual(Array.from(num.columns().kinds), [TAPE_KINDS.doc, TAPE_KINDS.int]);
+  assert.deepEqual(num.convert(), { ints: [42], floats: [] });
+  num.free();
+  const flag = await parseJsonTape("true");
+  assert.deepEqual(Array.from(flag.columns().kinds), [TAPE_KINDS.doc, TAPE_KINDS.true]);
+  assert.deepEqual(flag.convert(), { ints: [], floats: [] });
+  flag.free();
+});
+
+test("parseJsonTape: malformed JSON raises (strict grammar enforced)", async () => {
+  const { parseJsonTape } = await import("../src/index.js");
+  // the engine's JSON walk positions by byte offset in the message
+  // (line/col are 0 — that channel is the YAML reader's)
+  await assert.rejects(
+    () => parseJsonTape('{"a":'),
+    (e) => e.name === "YamlError" && /byte 5/.test(e.message));
+  // the strict route validates number grammar at parse: a malformed
+  // span never reaches the tape
+  await assert.rejects(() => parseJsonTape('{"a":1.2.3}'), (e) => e.name === "YamlError");
+});
+
+test("JsonTape: direct construction is refused; free is idempotent; reuse after free throws", async () => {
+  const { parseJsonTape, JsonTape } = await import("../src/index.js");
+  assert.throws(() => new JsonTape(), TypeError);
+  const tape = await parseJsonTape('{"a":1}');
+  assert.equal(tape.freed, false);
+  tape.free();
+  assert.equal(tape.freed, true);
+  tape.free();
+  assert.throws(() => tape.count, /freed/);
+  assert.throws(() => tape.columns(), /freed/);
+  assert.throws(() => tape.convert(), /freed/);
+});
+
+test("the tape frees its retained state after every parse (success and error)", async () => {
+  const { parseJsonTape, wasmModule } = await import("../src/index.js");
+  const mod = await wasmModule();
+  const tape = await parseJsonTape('{"a":1}');
+  tape.free();
+  assert.equal(mod._yeptris_wasm_tape_count(), 0, "tape not freed after free()");
+  await assert.rejects(() => parseJsonTape('{"a":'));
+  assert.equal(mod._yeptris_wasm_tape_count(), 0, "tape not freed after an error");
+});
+
+test("parseJsonTapeSync: the tape face rides synchronously after init", async () => {
+  const { init, parseJsonTapeSync } = await import("../src/index.js");
+  await init();
+  const tape = parseJsonTapeSync('{"k":[1,2]}');
+  assert.deepEqual(tape.convert(), { ints: [1, 2], floats: [] });
+  tape.free();
 });

@@ -16,6 +16,8 @@
 #include "yeptris/events.h"
 #include "yeptris/json.h"
 #include "yeptris/parse.h"
+#include "yeptris/plan.h"
+#include "yeptris/tape.h"
 #include "yeptris/validate.h"
 #include "yeptris/version.h"
 
@@ -875,3 +877,249 @@ int yeptris_wasm_schema_validate(yeptris_schema *s, const char *data, size_t len
 
 EMSCRIPTEN_KEEPALIVE
 void yeptris_wasm_schema_free(yeptris_schema *s) { yeptris_schema_free(s); }
+
+/* ---- the plan face (plan.h) --------------------------------------------
+ *
+ * The compiled columnar walk: a plan compiles once from a strict-JSON
+ * spec (kind seq/map, a path — string or segmented string array — and
+ * typed leaf children) and applies to a parsed document in ONE C pass,
+ * answering typed columns. yeptris-rs 0.6.78 `pub mod plan` is the
+ * reference wrapper shape.
+ *
+ * Across the wasm boundary the walk is RETAINED state, same lifecycle
+ * as the events drain: the result BORROWS the document (its string
+ * columns are (ptr,len) views into the document's regions) and the
+ * document borrows its input — so walk() retains the input copy, the
+ * document and the result in globals, the host reads its answers out
+ * through the accessor exports (every column accessor hands back a raw
+ * heap pointer the host copies from), and plan_walk_free releases all
+ * three. A new walk releases a previous undrained one defensively.
+ *
+ * The result pointer itself is never handed to the host — the retained
+ * globals are the single source, and a monotonically rising seq guard
+ * lets the host refuse a stale result object instead of silently
+ * answering the newer walk's data (the module-guard law: a stale read
+ * refuses loudly, never lies). */
+
+static YeptrisDocument g_pw_doc;
+static char *g_pw_buf;
+static yeptris_plan_result *g_pw_res;
+static unsigned g_pw_seq;
+
+static void yeptris_wasm_plan_walk_release(void) {
+    /* the result borrows the document, the document the buffer — this
+     * order, always */
+    yeptris_plan_result_free(g_pw_res);
+    g_pw_res = NULL;
+    yeptris_document_free(g_pw_doc);
+    g_pw_doc = NULL;
+    free(g_pw_buf);
+    g_pw_buf = NULL;
+}
+
+/* The plan handle crosses as an opaque wasm32 pointer the host stores
+ * verbatim (the compiled-schema pattern): 0 = compile failed, with the
+ * why on the error channel. A spec that PARSES but is then rejected
+ * (an unknown kind value, a malformed child) sets no engine message —
+ * the channel would answer a stale why from an earlier call. Compare
+ * the channel across the call: unchanged means the engine said
+ * nothing, and the generic reason stands instead of a lie. */
+EMSCRIPTEN_KEEPALIVE
+yeptris_plan *yeptris_wasm_plan_compile(const char *spec, size_t len) {
+    char prev[256];
+    const char *b = yeptris_last_error(NULL, NULL);
+    snprintf(prev, sizeof prev, "%s", b ? b : "");
+    YeptrisStatus st = YEPTRIS_OK;
+    yeptris_plan *plan = yeptris_plan_compile(spec, len, &st);
+    if (plan != NULL) {
+        return plan;
+    }
+    const char *after = yeptris_last_error(NULL, NULL);
+    if (after != NULL && after[0] != '\0' && strcmp(after, prev) != 0) {
+        capture_error(); /* the engine's why + position (spec JSON refused) */
+    } else {
+        capture_plain(st == YEPTRIS_ERROR_ARG ? "the plan spec is not a valid plan document"
+                                              : "the plan spec failed to parse");
+    }
+    return NULL;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int yeptris_wasm_plan_column_count(const yeptris_plan *plan) {
+    return plan != NULL ? (int)yeptris_plan_column_count(plan) : 0;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void yeptris_wasm_plan_free(yeptris_plan *plan) { yeptris_plan_free(plan); }
+
+EMSCRIPTEN_KEEPALIVE
+int yeptris_wasm_plan_walk(const yeptris_plan *plan, const char *data, size_t len) {
+    yeptris_wasm_plan_walk_release(); /* defensive: an undrained walk */
+    g_pw_buf = (char *)malloc(len > 0 ? len : 1);
+    if (g_pw_buf == NULL) {
+        capture_plain("plan walk allocation failed");
+        return YEPTRIS_ERROR_MEMORY;
+    }
+    if (len > 0) {
+        memcpy(g_pw_buf, data, len);
+    }
+    YeptrisStatus st = YEPTRIS_OK;
+    g_pw_doc = yeptris_parse(g_pw_buf, len, &st);
+    if (g_pw_doc == NULL) {
+        capture_error(); /* the YAML itself refused: the engine's why */
+        free(g_pw_buf);
+        g_pw_buf = NULL;
+        return (int)st;
+    }
+    g_pw_res = yeptris_document_plan_walk(g_pw_doc, plan, &st);
+    if (g_pw_res == NULL) {
+        /* the shape-disagreement class (PARSE) carries no engine
+         * message; everything else is memory/arg — say so directly,
+         * never a stale channel text */
+        capture_plain(st == YEPTRIS_ERROR_PARSE ? "the document shape disagrees with the plan"
+                                                : "the plan walk failed");
+        yeptris_document_free(g_pw_doc);
+        g_pw_doc = NULL;
+        free(g_pw_buf);
+        g_pw_buf = NULL;
+        return (int)st;
+    }
+    g_pw_seq++;
+    return YEPTRIS_OK;
+}
+
+EMSCRIPTEN_KEEPALIVE
+unsigned yeptris_wasm_plan_seq(void) { return g_pw_seq; }
+
+EMSCRIPTEN_KEEPALIVE
+int yeptris_wasm_plan_rows(void) {
+    return g_pw_res != NULL ? (int)yeptris_plan_result_rows(g_pw_res) : 0;
+}
+
+EMSCRIPTEN_KEEPALIVE
+int yeptris_wasm_plan_kind(size_t col) {
+    return g_pw_res != NULL ? yeptris_plan_result_kind(g_pw_res, col) : -1;
+}
+
+EMSCRIPTEN_KEEPALIVE
+const int64_t *yeptris_wasm_plan_ints(size_t col) {
+    return g_pw_res != NULL ? yeptris_plan_result_ints(g_pw_res, col) : NULL;
+}
+
+EMSCRIPTEN_KEEPALIVE
+const double *yeptris_wasm_plan_floats(size_t col) {
+    return g_pw_res != NULL ? yeptris_plan_result_floats(g_pw_res, col) : NULL;
+}
+
+EMSCRIPTEN_KEEPALIVE
+const yeptris_plan_str *yeptris_wasm_plan_strs(size_t col) {
+    return g_pw_res != NULL ? yeptris_plan_result_strs(g_pw_res, col) : NULL;
+}
+
+EMSCRIPTEN_KEEPALIVE
+const uint8_t *yeptris_wasm_plan_nulls(size_t col) {
+    return g_pw_res != NULL ? yeptris_plan_result_nulls(g_pw_res, col) : NULL;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void yeptris_wasm_plan_walk_free(void) { yeptris_wasm_plan_walk_release(); }
+
+/* ---- the tape face (tape.h) --------------------------------------------
+ *
+ * The compact JSON tape: one fused strict walk appends ONE record per
+ * token — no DOM, no links, no views. Records are three parallel
+ * columns (kind byte, off, len); numbers record spans only (the
+ * grammar is validated at parse on the strict route; convert is the
+ * authority for the lenient route's deferred records). Strings stay
+ * zero-copy spans into the caller's buffer — so the shim retains a
+ * COPY of the input for the tape's lifetime, same law as the walk:
+ * parse (feed, copy, construct), the accessor reads, then an explicit
+ * free. A new parse releases a previous undrained tape defensively.
+ *
+ * The engine hands the tape back through a caller-provided struct
+ * (parse memsets it), so the retained state is one static struct plus
+ * the buffer copy — and the seq guard idiom carries over: the host
+ * refuses a stale tape object instead of silently answering the newer
+ * parse's records. yeptris_tape_columns runs before every pointer
+ * hand-out (the compat columns materialize lazily on the interleaved
+ * route; a no-op when already materialized). */
+
+static yeptris_json_tape g_tp;
+static char *g_tp_buf;
+static unsigned g_tp_seq;
+static int g_tp_live;
+
+EMSCRIPTEN_KEEPALIVE
+int yeptris_wasm_tape_parse(const char *data, size_t len) {
+    if (g_tp_live) { /* defensive: the previous tape was not freed */
+        yeptris_tape_free(&g_tp);
+        g_tp_live = 0;
+    }
+    free(g_tp_buf);
+    g_tp_buf = (char *)malloc(len > 0 ? len : 1);
+    if (g_tp_buf == NULL) {
+        g_tp_buf = NULL;
+        capture_plain("tape allocation failed");
+        return YEPTRIS_ERROR_MEMORY;
+    }
+    if (len > 0) {
+        memcpy(g_tp_buf, data, len);
+    }
+    YeptrisStatus st = yeptris_parse_json_tape(g_tp_buf, len, &g_tp);
+    if (st != YEPTRIS_OK) {
+        capture_error();
+        free(g_tp_buf);
+        g_tp_buf = NULL;
+        return (int)st;
+    }
+    g_tp_live = 1;
+    g_tp_seq++;
+    return YEPTRIS_OK;
+}
+
+EMSCRIPTEN_KEEPALIVE
+unsigned yeptris_wasm_tape_seq(void) { return g_tp_seq; }
+
+EMSCRIPTEN_KEEPALIVE
+int yeptris_wasm_tape_count(void) { return g_tp_live ? (int)g_tp.count : 0; }
+
+EMSCRIPTEN_KEEPALIVE
+int yeptris_wasm_tape_columns(void) {
+    if (!g_tp_live) {
+        return YEPTRIS_ERROR_ARG;
+    }
+    return yeptris_tape_columns(&g_tp) == 0 ? YEPTRIS_OK : YEPTRIS_ERROR_MEMORY;
+}
+
+EMSCRIPTEN_KEEPALIVE
+const uint8_t *yeptris_wasm_tape_kinds(void) { return g_tp_live ? g_tp.kinds : NULL; }
+
+EMSCRIPTEN_KEEPALIVE
+const uint32_t *yeptris_wasm_tape_offs(void) { return g_tp_live ? g_tp.offs : NULL; }
+
+EMSCRIPTEN_KEEPALIVE
+const uint32_t *yeptris_wasm_tape_lens(void) { return g_tp_live ? g_tp.lens : NULL; }
+
+/* Converts the number records in [from, to): ivals/dvals are the
+ * HOST's malloc'd record-index-parallel buffers (the JS door zeroes
+ * them and reads only the number records' slots). A span that refuses
+ * to re-scan as a number answers SIZE_MAX — impossible for a tape
+ * this library produced — and crosses as -1. */
+EMSCRIPTEN_KEEPALIVE
+int yeptris_wasm_tape_convert(size_t from, size_t to, int64_t *ivals, double *dvals) {
+    if (!g_tp_live) {
+        return -1;
+    }
+    size_t n = yeptris_tape_convert(&g_tp, from, to, ivals, dvals);
+    return n == (size_t)-1 ? -1 : (int)n;
+}
+
+EMSCRIPTEN_KEEPALIVE
+void yeptris_wasm_tape_free(void) {
+    if (g_tp_live) {
+        yeptris_tape_free(&g_tp);
+        g_tp_live = 0;
+    }
+    free(g_tp_buf);
+    g_tp_buf = NULL;
+}

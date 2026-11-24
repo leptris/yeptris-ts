@@ -106,6 +106,27 @@ async function mod() {
     "_yeptris_wasm_schema_compile",
     "_yeptris_wasm_schema_validate",
     "_yeptris_wasm_schema_free",
+    "_yeptris_wasm_plan_compile",
+    "_yeptris_wasm_plan_column_count",
+    "_yeptris_wasm_plan_free",
+    "_yeptris_wasm_plan_walk",
+    "_yeptris_wasm_plan_seq",
+    "_yeptris_wasm_plan_rows",
+    "_yeptris_wasm_plan_kind",
+    "_yeptris_wasm_plan_ints",
+    "_yeptris_wasm_plan_floats",
+    "_yeptris_wasm_plan_strs",
+    "_yeptris_wasm_plan_nulls",
+    "_yeptris_wasm_plan_walk_free",
+    "_yeptris_wasm_tape_parse",
+    "_yeptris_wasm_tape_seq",
+    "_yeptris_wasm_tape_count",
+    "_yeptris_wasm_tape_columns",
+    "_yeptris_wasm_tape_kinds",
+    "_yeptris_wasm_tape_offs",
+    "_yeptris_wasm_tape_lens",
+    "_yeptris_wasm_tape_convert",
+    "_yeptris_wasm_tape_free",
     "_yeptris_wasm_out",
     "_yeptris_wasm_out_len",
     "_yeptris_wasm_out_free",
@@ -894,6 +915,515 @@ function eventsCore(mod, yaml, options) {
   }
 }
 
+// ---- the plan face (plan.h; the compiled columnar walk) ----------------
+//
+// The query surface, the rs face's shape (yeptris-rs 0.6.78, `pub mod
+// plan`): a plan compiles ONCE from a strict-JSON spec
+//
+//   {"kind":"seq","path":"items","children":[
+//      {"name":"id","kind":"int"}, {"name":"ok","kind":"bool"}, ...]}
+//
+// (kind: "seq" | "map" — the rows container's shape at the root; path:
+// the root mapping's key holding the rows, a string or an ARRAY of
+// strings for a segmented path walked mapping by mapping; leaf kinds:
+// int, float, str, bool) and applies to a parsed document in ONE C
+// pass, answering typed columns. Across the wasm boundary the walk is
+// RETAINED state, the events-face lifecycle: the result BORROWS the
+// document (its string columns are (ptr,len) views into the
+// document's regions) and the document borrows its input — walk()
+// retains all three until the host has copied its answers out, then
+// free() releases them (a newer walk releases an undrained one
+// defensively). Every accessor COPIES from the heap; nothing
+// engine-owned survives free().
+
+// YEP_PLAN_* (plan.h) -> the leaf-kind name.
+const PLAN_KINDS = {
+  0: "int",
+  1: "float",
+  2: "str",
+  3: "bool",
+};
+
+/** The columnar result of one plan walk. Produced by Plan.walk(); a
+ * shim-retained answer the accessors copy from — free() releases the
+ * engine state. After free() reuse throws; so does a STALE result
+ * (a newer walk() replaced the retained state) — never a silent wrong
+ * answer. */
+export class PlanResult {
+  /** @private — produced by Plan.walk() only */
+  constructor() {
+    throw new TypeError(
+      "yeptris: walk results come from plan.walk(), not new PlanResult()");
+  }
+
+  static _take(mod, seq) {
+    const r = Object.create(PlanResult.prototype);
+    r._mod = mod;
+    r._seq = seq; // the shim's retained-walk generation this answer is
+    r._freed = false;
+    return r;
+  }
+
+  /** True once free() ran. */
+  get freed() {
+    return this._freed;
+  }
+
+  _requireLive(who) {
+    if (this._freed) {
+      throw new Error(
+        `yeptris: the walk result is freed — ${who} after free() is ` +
+          "refused (walk again for a fresh result)");
+    }
+    if (this._mod._yeptris_wasm_plan_seq() !== this._seq) {
+      throw new Error(
+        "yeptris: stale walk result — a newer walk() replaced the " +
+          "retained state; read this result's columns before walking again");
+    }
+  }
+
+  /** The number of rows (one per row of the rows container). */
+  get rows() {
+    this._requireLive("rows");
+    return this._mod._yeptris_wasm_plan_rows();
+  }
+
+  /** The leaf kind of column `col`: "int" | "float" | "str" | "bool". */
+  kind(col) {
+    this._requireLive("kind");
+    const k = this._mod._yeptris_wasm_plan_kind(col);
+    return PLAN_KINDS[k] ?? `unknown-${k}`;
+  }
+
+  /** INT column values as JS numbers. BOOL columns read through here
+   * too, as 0/1 — the engine's columnar contract (the rs face's
+   * `ints()`). Exact within +/-2^53 (the load()'s JSON round-trip
+   * law); the engine's int64 wider than that rounds, per JS number. */
+  ints(col) {
+    this._requireLive("ints");
+    const k = this._mod._yeptris_wasm_plan_kind(col);
+    if (k !== 0 && k !== 3) {
+      throw new TypeError(
+        `yeptris: ints() reads int and bool columns — column ${col} is ` +
+          `${PLAN_KINDS[k] ?? `unknown-${k}`}`);
+    }
+    const rows = this._mod._yeptris_wasm_plan_rows();
+    const p = this._mod._yeptris_wasm_plan_ints(col);
+    if (!p || rows === 0) {
+      return [];
+    }
+    // views fetched AFTER the calls (the memory may have grown); the
+    // int64 lane composes from the u32 pair — wasm64 views are not a
+    // given across the emcc eras this surface builds on
+    const u32 = this._mod.HEAPU32;
+    const base = p >> 2;
+    const out = new Array(rows);
+    for (let i = 0; i < rows; i++) {
+      const hi = u32[base + i * 2 + 1];
+      let v = hi * 4294967296 + u32[base + i * 2];
+      if (hi >= 2147483648) {
+        v -= 18446744073709551616;
+      }
+      out[i] = v;
+    }
+    return out;
+  }
+
+  /** FLOAT column values as JS numbers (the f64 lane, copied). */
+  floats(col) {
+    this._requireLive("floats");
+    const k = this._mod._yeptris_wasm_plan_kind(col);
+    if (k !== 1) {
+      throw new TypeError(
+        `yeptris: floats() reads float columns — column ${col} is ` +
+          `${PLAN_KINDS[k] ?? `unknown-${k}`}`);
+    }
+    const rows = this._mod._yeptris_wasm_plan_rows();
+    const p = this._mod._yeptris_wasm_plan_floats(col);
+    if (!p || rows === 0) {
+      return [];
+    }
+    const f64 = this._mod.HEAPF64;
+    const base = p >> 3;
+    return Array.from(f64.subarray(base, base + rows));
+  }
+
+  /** STR column values as JS strings (the DOM leg's (ptr,len) views,
+   * decoded and copied out of the heap). */
+  strs(col) {
+    this._requireLive("strs");
+    const k = this._mod._yeptris_wasm_plan_kind(col);
+    if (k !== 2) {
+      throw new TypeError(
+        `yeptris: strs() reads str columns — column ${col} is ` +
+          `${PLAN_KINDS[k] ?? `unknown-${k}`}`);
+    }
+    const rows = this._mod._yeptris_wasm_plan_rows();
+    const p = this._mod._yeptris_wasm_plan_strs(col);
+    if (!p || rows === 0) {
+      return [];
+    }
+    // records of yeptris_plan_str { const char* p; size_t len; } —
+    // 8 bytes on wasm32: one u32 pair per row
+    const u8 = this._mod.HEAPU8;
+    const u32 = this._mod.HEAPU32;
+    const base = p >> 2;
+    const out = new Array(rows);
+    for (let i = 0; i < rows; i++) {
+      const sp = u32[base + i * 2];
+      const sl = u32[base + i * 2 + 1];
+      out[i] = sl !== 0 ? decodeArena(u8, sp, sl) : "";
+    }
+    return out;
+  }
+
+  /** The column's null markers: 1 = the row's leaf was null or
+   * missing. A Uint8Array copy of `rows` entries. */
+  nulls(col) {
+    this._requireLive("nulls");
+    const rows = this._mod._yeptris_wasm_plan_rows();
+    const p = this._mod._yeptris_wasm_plan_nulls(col);
+    if (!p || rows === 0) {
+      return new Uint8Array(0);
+    }
+    // slice COPIES: a subarray would view the heap that free() releases
+    return this._mod.HEAPU8.slice(p, p + rows);
+  }
+
+  /** Releases the retained walk (result + document + input copy).
+   * Idempotent. A STALE result only dies locally — the retained state
+   * belongs to the walk that replaced it. */
+  free() {
+    if (this._freed) return;
+    this._freed = true;
+    if (this._mod._yeptris_wasm_plan_seq() === this._seq) {
+      this._mod._yeptris_wasm_plan_walk_free();
+    }
+  }
+}
+
+/** A COMPILED plan (plan.h): the query spec parses once — its columns
+ * and segmented path retained behind one opaque handle — and walks
+ * MANY documents. Build with compilePlan(); direct construction is
+ * refused. After free() the handle is dead: reuse throws. */
+export class Plan {
+  /** @private — produced by compilePlan() only */
+  constructor() {
+    throw new TypeError(
+      "yeptris: build plans with compilePlan(), not new Plan()");
+  }
+
+  static _take(mod, handle) {
+    const s = Object.create(Plan.prototype);
+    s._mod = mod; // the module the handle lives in (compile ran => initialized)
+    s._handle = handle;
+    s._freed = false;
+    return s;
+  }
+
+  /** True once free() ran. */
+  get freed() {
+    return this._freed;
+  }
+
+  _requireAlive(who) {
+    if (this._freed) {
+      throw new Error(
+        `yeptris: the plan handle is freed — ${who} on a freed plan is ` +
+          "refused (compile a fresh one with compilePlan())");
+    }
+  }
+
+  /** The number of leaf columns the spec declared. */
+  get columnCount() {
+    this._requireAlive("columnCount");
+    return this._mod._yeptris_wasm_plan_column_count(this._handle);
+  }
+
+  /** Apply the plan to a YAML document (the DOM leg): typed columns,
+   * one C pass, no per-node host dispatch. Synchronous — the handle
+   * only exists once the module is initialized. Throws YamlError when
+   * the document does not parse or its shape disagrees with the plan
+   * (the rows container the path names is not there). */
+  walk(yaml) {
+    this._requireAlive("walk");
+    return planWalkCore(this._mod, this, yaml);
+  }
+
+  /** Frees the handle. Idempotent; afterwards reuse throws. */
+  free() {
+    if (this._freed) return;
+    this._freed = true;
+    this._mod._yeptris_wasm_plan_free(this._handle);
+    this._handle = 0;
+  }
+}
+
+function planWalkCore(mod, plan, yaml) {
+  const [ptr, len] = cstr(mod, yaml);
+  try {
+    const st = mod._yeptris_wasm_plan_walk(plan._handle, ptr, len);
+    if (st !== 0) {
+      throw new YamlError(
+        mod.UTF8ToString(mod._yeptris_wasm_last_error()),
+        mod._yeptris_wasm_last_error_line(),
+        mod._yeptris_wasm_last_error_column());
+    }
+    return PlanResult._take(mod, mod._yeptris_wasm_plan_seq());
+  } finally {
+    freeCstr(mod, ptr);
+  }
+}
+
+function compilePlanCore(mod, spec) {
+  if (spec === undefined || spec === null) {
+    throw new TypeError("yeptris: plan spec bytes are required");
+  }
+  const bytes = typeof spec === "string" ? spec : JSON.stringify(spec);
+  if (bytes.length === 0) {
+    throw new TypeError("yeptris: plan spec holds no document");
+  }
+  const [ptr, len] = cstr(mod, bytes);
+  let handle;
+  try {
+    handle = mod._yeptris_wasm_plan_compile(ptr, len);
+  } finally {
+    freeCstr(mod, ptr);
+  }
+  if (handle === 0) {
+    throw failFrom(mod); // the engine's why rides last_error
+  }
+  return Plan._take(mod, handle);
+}
+
+/** Compile a plan from a strict-JSON spec document (object or string;
+ * the shape plan.h spells: kind "seq"|"map", path string|string[],
+ * children of { name, kind: int|float|str|bool }). Throws TypeError
+ * for empty/absent spec bytes and YamlError (with the engine's
+ * message) for bytes that do not parse or name no engine kind. */
+export async function compilePlan(spec) {
+  const m = await mod();
+  return compilePlanCore(m, spec);
+}
+
+// ---- the tape face (tape.h; the columnar JSON parse) -------------------
+//
+// The simdjson-class materialization: one fused strict walk appends
+// ONE record per token — no DOM nodes, no links, no views. Records
+// are three parallel columns (kind byte, off, len); bools encode in
+// the kind, container links ride the off column (matching
+// open/close), numbers record spans only, and strings stay zero-copy
+// spans into the caller's buffer — which is why the tape is RETAINED
+// state across the wasm boundary (the events-face lifecycle again):
+// parse() copies the input and retains tape + copy, the accessors
+// copy their answers out, free() releases both. The record kinds are
+// ABI-pinned (tape.h, appending-only) and exported below as data.
+
+/** The tape record kinds (tape.h's YEP_T_*, ABI-pinned). `kinds` in
+ * columns() answers these raw bytes; the names spell the vocabulary. */
+export const TAPE_KINDS = Object.freeze({
+  doc: 0, // document boundary (records start after it)
+  null: 1,
+  true: 2, // the kind IS the value
+  false: 3,
+  int: 4, // off/len: signed digit span; convert materializes
+  float: 5, // off/len: float text span
+  str: 6, // off/len: raw span into the source (escapes untouched)
+  "seq-open": 7, // off: index of the matching close
+  "map-open": 8, // off: index of the matching close
+  close: 9, // off: index of the matching open
+  num: 10, // lenient route only: a number span the grammar has NOT
+  // validated at parse — convert is the authority
+});
+
+/** A parsed JSON tape (tape.h): the record stream of one strict
+ * parse, retained behind the module. Build with parseJsonTape();
+ * direct construction is refused. After free() reuse throws; a newer
+ * parse() makes older tape objects stale — they refuse instead of
+ * answering the newer records. */
+export class JsonTape {
+  /** @private — produced by parseJsonTape() only */
+  constructor() {
+    throw new TypeError(
+      "yeptris: build tapes with parseJsonTape(), not new JsonTape()");
+  }
+
+  static _take(mod, seq) {
+    const t = Object.create(JsonTape.prototype);
+    t._mod = mod;
+    t._seq = seq; // the shim's retained-tape generation this answer is
+    t._freed = false;
+    return t;
+  }
+
+  /** True once free() ran. */
+  get freed() {
+    return this._freed;
+  }
+
+  _requireLive(who) {
+    if (this._freed) {
+      throw new Error(
+        `yeptris: the tape is freed — ${who} after free() is refused ` +
+          "(parse again for a fresh tape)");
+    }
+    if (this._mod._yeptris_wasm_tape_seq() !== this._seq) {
+      throw new Error(
+        "yeptris: stale tape — a newer parseJsonTape() replaced the " +
+          "retained state; read this tape's records before parsing again");
+    }
+  }
+
+  /** The number of records (one per token, the document boundary
+   * record included). */
+  get count() {
+    this._requireLive("count");
+    return this._mod._yeptris_wasm_tape_count();
+  }
+
+  /** The three parallel columns, materialized (the shim runs
+   * yeptris_tape_columns first — a no-op when already materialized)
+   * and COPIED out of the heap: `{ kinds: Uint8Array, offs:
+   * Uint32Array, lens: Uint32Array }`, one entry per record. `kinds`
+   * answers TAPE_KINDS bytes; `offs`/`lens` are span starts and
+   * lengths into the SOURCE for str/int/float records and container
+   * links for open/close records. */
+  columns() {
+    this._requireLive("columns");
+    const st = this._mod._yeptris_wasm_tape_columns();
+    if (st !== 0) {
+      throw new Error(
+        `yeptris: tape column materialization failed (status ${st})`);
+    }
+    const count = this._mod._yeptris_wasm_tape_count();
+    // heap views fetched AFTER the calls (the memory may have grown);
+    // slice COPIES — the tape frees under these
+    const u8 = this._mod.HEAPU8;
+    const u32 = this._mod.HEAPU32;
+    const kinds = this._mod._yeptris_wasm_tape_kinds();
+    const offs = this._mod._yeptris_wasm_tape_offs();
+    const lens = this._mod._yeptris_wasm_tape_lens();
+    return {
+      kinds: kinds !== 0 ? u8.slice(kinds, kinds + count) : new Uint8Array(0),
+      offs: offs !== 0
+        ? u32.slice(offs >> 2, (offs >> 2) + count)
+        : new Uint32Array(0),
+      lens: lens !== 0
+        ? u32.slice(lens >> 2, (lens >> 2) + count)
+        : new Uint32Array(0),
+    };
+  }
+
+  /** Convert the number records in `[from, to)` (record indices; the
+   * defaults convert every number record): answers
+   * `{ ints: number[], floats: number[] }` — DENSE, in tape order:
+   * the INT records' converted values and the FLOAT records' (a
+   * lenient route's `num` record converts as a float — convert is the
+   * grammar's authority there). Exact within +/-2^53 (the load()'s
+   * JSON round-trip law). */
+  convert(from = 0, to) {
+    this._requireLive("convert");
+    const count = this._mod._yeptris_wasm_tape_count();
+    const end = to === undefined || to === null ? count : to;
+    const reqIndex = (v, who) => {
+      if (typeof v !== "number" || !Number.isInteger(v) || v < 0) {
+        throw new TypeError(
+          `yeptris: convert ${who} must be a non-negative integer ` +
+            "(a record index)");
+      }
+    };
+    reqIndex(from, "from");
+    if (to !== undefined && to !== null) {
+      reqIndex(to, "to");
+    }
+    if (from > end) {
+      throw new TypeError("yeptris: convert from exceeds to");
+    }
+    if (end > count) {
+      throw new TypeError(
+        `yeptris: convert to ${end} exceeds the tape's ${count} records`);
+    }
+    const cols = this.columns(); // the kinds view drives the dense answer
+    const bufN = count > 0 ? count : 1;
+    const ivals = this._mod._malloc(bufN * 8);
+    const dvals = this._mod._malloc(bufN * 8);
+    try {
+      // record-index-parallel slots, zeroed: the engine writes only
+      // the number records' slots, the untouched ones read 0
+      new Uint8Array(this._mod.HEAPU8.buffer, ivals, bufN * 8).fill(0);
+      new Uint8Array(this._mod.HEAPU8.buffer, dvals, bufN * 8).fill(0);
+      const n = this._mod._yeptris_wasm_tape_convert(from, end, ivals, dvals);
+      if (n === -1) {
+        throw new Error(
+          "yeptris: a number span refused to convert (not a tape this " +
+            "library produced)");
+      }
+      // views fetched AFTER the call: the mallocs may have grown the
+      // memory, and the exported views re-bind on growth
+      const u32 = this._mod.HEAPU32;
+      const f64 = this._mod.HEAPF64;
+      const ibase = ivals >> 2;
+      const dbase = dvals >> 3;
+      const ints = [];
+      const floats = [];
+      for (let i = from; i < end; i++) {
+        const kind = cols.kinds[i];
+        if (kind === TAPE_KINDS.int) {
+          const hi = u32[ibase + i * 2 + 1];
+          let v = hi * 4294967296 + u32[ibase + i * 2];
+          if (hi >= 2147483648) {
+            v -= 18446744073709551616;
+          }
+          ints.push(v);
+        } else if (kind === TAPE_KINDS.float || kind === TAPE_KINDS.num) {
+          floats.push(f64[dbase + i]);
+        }
+      }
+      return { ints, floats };
+    } finally {
+      this._mod._yeptris_wasm_free(ivals);
+      this._mod._yeptris_wasm_free(dvals);
+    }
+  }
+
+  /** Releases the retained tape and its input copy. Idempotent;
+   * afterwards reuse throws. */
+  free() {
+    if (this._freed) return;
+    this._freed = true;
+    this._mod._yeptris_wasm_tape_free();
+  }
+}
+
+function parseJsonTapeCore(mod, json) {
+  const [ptr, len] = cstr(mod, json);
+  try {
+    const st = mod._yeptris_wasm_tape_parse(ptr, len);
+    if (st !== 0) {
+      throw new YamlError(
+        mod.UTF8ToString(mod._yeptris_wasm_last_error()),
+        mod._yeptris_wasm_last_error_line(),
+        mod._yeptris_wasm_last_error_column());
+    }
+    return JsonTape._take(mod, mod._yeptris_wasm_tape_seq());
+  } finally {
+    freeCstr(mod, ptr);
+  }
+}
+
+/** Parse strict JSON into the columnar tape (tape.h): one record per
+ * token, no DOM — the simdjson-class materialization. Scalar roots
+ * ride (a single record after the boundary). Throws YamlError with
+ * line/column on malformed input — the strict route validates the
+ * number grammar at parse, so a malformed span never reaches the
+ * tape (the lenient route's deferred numbers are an engine door this
+ * face does not open; convert remains the authority for `num`
+ * records). */
+export async function parseJsonTape(json) {
+  const m = await mod();
+  return parseJsonTapeCore(m, json);
+}
+
 /** Parse YAML text and return the document as a JavaScript value
  * (the engine's canonical JSON, JSON.parse'd). Throws YamlError with
  * line/column on malformed input. A multi-document stream answers
@@ -1037,6 +1567,16 @@ export function isValidSync(input, options) {
 /** compileSchema's Sync twin. Throws unless the module is initialized. */
 export function compileSchemaSync(jsonSchema) {
   return compileSchemaCore(requireMod("compileSchemaSync"), jsonSchema);
+}
+
+/** compilePlan's Sync twin. Throws unless the module is initialized. */
+export function compilePlanSync(spec) {
+  return compilePlanCore(requireMod("compilePlanSync"), spec);
+}
+
+/** parseJsonTape's Sync twin. Throws unless the module is initialized. */
+export function parseJsonTapeSync(json) {
+  return parseJsonTapeCore(requireMod("parseJsonTapeSync"), json);
 }
 
 /** version's Sync twin. Throws unless the module is initialized. */
