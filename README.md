@@ -33,6 +33,8 @@ const yaml = await dump({ name: "yeptris", langs: ["c", "rust"] });
 | `validate(input, options?)` | The WHOLE validation report: every diagnostic, in engine order (`[]` when valid). |
 | `isValid(input, options?)` | `true` when `validate` answers no diagnostics. |
 | `compileSchema(jsonSchema)` | A compiled `Schema` handle — parse the schema ONCE, validate many streams. |
+| `compilePlan(spec)` | A compiled `Plan` handle (plan.h, the rs face's shape) — the query spec parses ONCE, `plan.walk(yaml)` applies it to a document in one C pass and answers typed columns: `rows`, `kind(col)` (`int`/`float`/`str`/`bool`), `ints`/`floats`/`strs` (copies; bools read through `ints` as 0/1) and `nulls` (the null/missing markers). |
+| `parseJsonTape(json)` | A `JsonTape` (tape.h) — the columnar record stream of one strict JSON parse: one record per token, no DOM. `columns()` copies the `kinds`/`offs`/`lens` triple (spans are offsets into YOUR source string), `convert([from, to])` materializes the number records as dense `{ ints, floats }`. The pinned record vocabulary is exported as `TAPE_KINDS`. |
 | `version()` | The libyeptris version string. |
 | `wasmModule()` | The cached wasm module instance (diagnostics: heap/memory inspection, the engine's raw exports). |
 | `init()` | Initializes the wasm module (idempotent) — what unlocks the `*Sync` forms. |
@@ -43,12 +45,13 @@ The wasm executes synchronously; every async form is async only
 because the FIRST call may initialize the module. After one
 `await init()` (or any async call) the same bodies run synchronously:
 `loadSync`, `loadAllSync`, `loadJSONSync`, `dumpSync`, `eventsSync`,
-`validateSync`, `isValidSync`, `compileSchemaSync`, `versionSync` —
+`validateSync`, `isValidSync`, `compileSchemaSync`, `compilePlanSync`,
+`parseJsonTapeSync`, `versionSync` —
 same arguments, same answers, no `Promise`. Each `*Sync` form refuses
 to run uninitialized (the lazy import is an async door) and names the
-way out in the error; the `Schema` handle's own methods
-(`validate`/`isValid`) are synchronous by construction — a handle only
-exists once the module is initialized.
+way out in the error; the `Schema`/`Plan`/`JsonTape` handles' own
+methods are synchronous by construction — a handle only exists once
+the module is initialized.
 
 ```js
 await init();                      // once, up front
